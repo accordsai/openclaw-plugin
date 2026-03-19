@@ -1,0 +1,80 @@
+{
+  "id": "vaultclaw-mcp-approval-handoff",
+  "name": "Vaultclaw MCP Approval Handoff",
+  "description": "Auto-resume Vaultclaw MCP approval-required tool flows.",
+  "version": "0.1.8",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "pollIntervalMs": {
+        "type": "integer",
+        "default": 1500,
+        "minimum": 250,
+        "maximum": 10000
+      },
+      "maxWaitMs": {
+        "type": "integer",
+        "default": 600000,
+        "minimum": 1000,
+        "maximum": 3600000
+      },
+      "commandTimeoutMs": {
+        "type": "integer",
+        "default": 720000,
+        "minimum": 1001,
+        "maximum": 7200000
+      },
+      "maxConcurrentWaits": {
+        "type": "integer",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 100
+      },
+      "reconcileOnValidationError": {
+        "type": "boolean",
+        "default": true
+      },
+      "reconcileOnUnknownTerminal": {
+        "type": "boolean",
+        "default": true
+      },
+      "reconcileTimeoutMs": {
+        "type": "integer",
+        "default": 15000,
+        "minimum": 1000,
+        "maximum": 60000
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enable Auto Approval Wait"
+    },
+    "pollIntervalMs": {
+      "label": "Poll Interval (ms)"
+    },
+    "maxWaitMs": {
+      "label": "Max Wait (ms)"
+    },
+    "commandTimeoutMs": {
+      "label": "Command Timeout (ms)"
+    },
+    "maxConcurrentWaits": {
+      "label": "Max Concurrent Waits"
+    },
+    "reconcileOnValidationError": {
+      "label": "Reconcile on Validation Error"
+    },
+    "reconcileOnUnknownTerminal": {
+      "label": "Reconcile on Unknown Terminal"
+    },
+    "reconcileTimeoutMs": {
+      "label": "Reconcile Timeout (ms)"
+    }
+  }
+}
