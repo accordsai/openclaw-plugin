@@ -35,6 +35,10 @@
         "minimum": 1,
         "maximum": 100
       },
+      "allowMcporterFallback": {
+        "type": "boolean",
+        "default": false
+      },
       "reconcileOnValidationError": {
         "type": "boolean",
         "default": true
@@ -43,11 +47,96 @@
         "type": "boolean",
         "default": true
       },
+      "reconcileOnWaitError": {
+        "type": "boolean",
+        "default": true
+      },
       "reconcileTimeoutMs": {
         "type": "integer",
         "default": 15000,
         "minimum": 1000,
         "maximum": 60000
+      },
+      "vaultCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "defaultEnabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "defaultMode": {
+            "type": "string",
+            "enum": [
+              "hybrid",
+              "strict"
+            ],
+            "default": "hybrid"
+          },
+          "autoDisableTelegramNativeCommands": {
+            "type": "boolean",
+            "default": true
+          },
+          "sessionModeTtlMs": {
+            "type": "integer",
+            "default": 604800000,
+            "minimum": 60000,
+            "maximum": 2592000000
+          },
+          "maxConcurrentRuns": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 100
+          },
+          "enableCoreFallback": {
+            "type": "boolean",
+            "default": true
+          },
+          "coreFallbackTimeoutMs": {
+            "type": "integer",
+            "default": 30000,
+            "minimum": 1000,
+            "maximum": 120000
+          },
+          "resolverTool": {
+            "type": "string",
+            "default": "vaultclaw_route_resolve"
+          },
+          "resolverTimeoutMs": {
+            "type": "integer",
+            "default": 8000,
+            "minimum": 1000,
+            "maximum": 60000
+          },
+          "enrichmentGlobalTimeoutMs": {
+            "type": "integer",
+            "default": 10000,
+            "minimum": 1000,
+            "maximum": 60000
+          },
+          "enrichmentTaskTimeoutMs": {
+            "type": "integer",
+            "default": 6000,
+            "minimum": 1000,
+            "maximum": 60000
+          },
+          "deterministicDomains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "google.gmail",
+              "generic.http"
+            ],
+            "minItems": 1
+          }
+        }
       }
     }
   },
@@ -67,14 +156,56 @@
     "maxConcurrentWaits": {
       "label": "Max Concurrent Waits"
     },
+    "allowMcporterFallback": {
+      "label": "Allow MCporter Fallback"
+    },
     "reconcileOnValidationError": {
       "label": "Reconcile on Validation Error"
     },
     "reconcileOnUnknownTerminal": {
       "label": "Reconcile on Unknown Terminal"
     },
+    "reconcileOnWaitError": {
+      "label": "Reconcile on Wait Error"
+    },
     "reconcileTimeoutMs": {
       "label": "Reconcile Timeout (ms)"
+    },
+    "vaultCommand.enabled": {
+      "label": "Enable /vault Command"
+    },
+    "vaultCommand.defaultEnabled": {
+      "label": "Default Session State"
+    },
+    "vaultCommand.defaultMode": {
+      "label": "Default /vault Mode"
+    },
+    "vaultCommand.autoDisableTelegramNativeCommands": {
+      "label": "Auto-disable Telegram Native Commands"
+    },
+    "vaultCommand.sessionModeTtlMs": {
+      "label": "Session Mode TTL (ms)"
+    },
+    "vaultCommand.maxConcurrentRuns": {
+      "label": "Max Concurrent /vault Runs"
+    },
+    "vaultCommand.enableCoreFallback": {
+      "label": "Enable HYBRID Core Fallback"
+    },
+    "vaultCommand.coreFallbackTimeoutMs": {
+      "label": "Core Fallback Timeout (ms)"
+    },
+    "vaultCommand.resolverTool": {
+      "label": "Resolver Tool"
+    },
+    "vaultCommand.resolverTimeoutMs": {
+      "label": "Resolver Timeout (ms)"
+    },
+    "vaultCommand.enrichmentGlobalTimeoutMs": {
+      "label": "Enrichment Global Timeout (ms)"
+    },
+    "vaultCommand.enrichmentTaskTimeoutMs": {
+      "label": "Enrichment Task Timeout (ms)"
     }
   }
 }

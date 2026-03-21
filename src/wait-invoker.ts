@@ -939,11 +939,58 @@ function shouldAttemptUnknownTerminalReconcile(
   return terminalStatus === "FAILED" || decision === "UNKNOWN" || decision === "";
 }
 
+function shouldAttemptErrorReconcile(
+  error: WaitCallError,
+  options: {
+    onValidationError: boolean;
+    onWaitError: boolean;
+  },
+): boolean {
+  if (error.code === "ABORTED" || error.code === "MCP_WAIT_TIMEOUT" || error.category === "timeout") {
+    return false;
+  }
+  if (error.category === "auth") {
+    return false;
+  }
+  if (error.category === "validation") {
+    return options.onValidationError;
+  }
+  return options.onWaitError;
+}
+
+async function maybeReconcileAfterWaitError(params: {
+  error: unknown;
+  config: OpenClawConfig;
+  sessionKey?: string;
+  handle: ApprovalHandle;
+  signal?: AbortSignal;
+  options: {
+    onValidationError: boolean;
+    onWaitError: boolean;
+    timeoutMs: number;
+  };
+}): Promise<WaitSuccess | undefined> {
+  if (!isWaitCallError(params.error)) {
+    return undefined;
+  }
+  if (!shouldAttemptErrorReconcile(params.error, params.options)) {
+    return undefined;
+  }
+  return await reconcileWaitResult({
+    config: params.config,
+    sessionKey: params.sessionKey,
+    handle: params.handle,
+    signal: params.signal,
+    reconcileTimeoutMs: params.options.timeoutMs,
+  });
+}
+
 export function createGatewayToolsInvokeWaitInvoker(config: OpenClawConfig): WaitInvoker {
   return async (params) => {
     const reconcileOptions = {
       onValidationError: params.reconcile?.onValidationError !== false,
       onUnknownTerminal: params.reconcile?.onUnknownTerminal !== false,
+      onWaitError: params.reconcile?.onWaitError !== false,
       timeoutMs: params.reconcile?.timeoutMs ?? 15000,
     };
 
@@ -963,7 +1010,15 @@ export function createGatewayToolsInvokeWaitInvoker(config: OpenClawConfig): Wai
       });
       primary = parseWaitSuccess(invoke.invokeResult);
     } catch (error) {
-      if (isWaitCallError(error) && shouldFallbackToMcporterFromError(error)) {
+      if (isWaitCallError(error) && error.code === "ABORTED") {
+        throw error;
+      }
+
+      if (
+        params.allowMcporterFallback === true &&
+        isWaitCallError(error) &&
+        shouldFallbackToMcporterFromError(error)
+      ) {
         try {
           primary = await invokeMcporterWait({
             config,
@@ -977,43 +1032,30 @@ export function createGatewayToolsInvokeWaitInvoker(config: OpenClawConfig): Wai
           if (isWaitCallError(fallbackError) && fallbackError.code === "ABORTED") {
             throw fallbackError;
           }
-          if (
-            isWaitCallError(fallbackError) &&
-            reconcileOptions.onValidationError &&
-            fallbackError.category === "validation"
-          ) {
-            const reconciled = await reconcileWaitResult({
-              config,
-              sessionKey: params.sessionKey,
-              handle: params.handle,
-              signal: params.signal,
-              reconcileTimeoutMs: reconcileOptions.timeoutMs,
-            });
-            if (reconciled) {
-              return reconciled;
-            }
-          }
-          throw fallbackError;
-        }
-      } else {
-        if (isWaitCallError(error) && error.code === "ABORTED") {
-          throw error;
-        }
-        if (
-          isWaitCallError(error) &&
-          reconcileOptions.onValidationError &&
-          error.category === "validation"
-        ) {
-          const reconciled = await reconcileWaitResult({
+          const reconciled = await maybeReconcileAfterWaitError({
+            error: fallbackError,
             config,
             sessionKey: params.sessionKey,
             handle: params.handle,
             signal: params.signal,
-            reconcileTimeoutMs: reconcileOptions.timeoutMs,
+            options: reconcileOptions,
           });
           if (reconciled) {
             return reconciled;
           }
+          throw fallbackError;
+        }
+      } else {
+        const reconciled = await maybeReconcileAfterWaitError({
+          error,
+          config,
+          sessionKey: params.sessionKey,
+          handle: params.handle,
+          signal: params.signal,
+          options: reconcileOptions,
+        });
+        if (reconciled) {
+          return reconciled;
         }
         throw error;
       }

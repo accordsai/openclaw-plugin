@@ -50,6 +50,13 @@ type WorkerState = {
   terminalSent: boolean;
 };
 
+function hasActionableInvalidIdentifiers(parsed: {
+  runId?: string;
+  jobId?: string;
+}): boolean {
+  return Boolean(parsed.runId || parsed.jobId);
+}
+
 export class ApprovalHandoffManager {
   private readonly config: ApprovalHandoffConfig;
   private readonly waitInvoker: WaitInvoker;
@@ -106,8 +113,22 @@ export class ApprovalHandoffManager {
         correlation,
         extra: { reason: parsed.message },
       });
+      if (!hasActionableInvalidIdentifiers(parsed)) {
+        logStructured({
+          logger: this.logger,
+          level: "debug",
+          event: "approval_detected_invalid_suppressed",
+          correlation,
+          extra: {
+            reason: parsed.message,
+            suppression_reason: "missing_actionable_run_or_job_identifier",
+          },
+        });
+        return;
+      }
       this.notifier.post({
         sessionKey: ctx.sessionKey,
+        sessionId: ctx.sessionId,
         reason: "approval-invalid",
         text: invalidApprovalPayloadMessage({
           reason: parsed.message,
@@ -154,6 +175,7 @@ export class ApprovalHandoffManager {
     if (this.workers.size >= this.config.maxConcurrentWaits) {
       this.notifier.post({
         sessionKey: ctx.sessionKey,
+        sessionId: ctx.sessionId,
         reason: "approval-over-capacity",
         text: "Approval auto-wait capacity reached. Try again after existing waits complete.",
       });
@@ -171,6 +193,7 @@ export class ApprovalHandoffManager {
 
     this.notifier.post({
       sessionKey: ctx.sessionKey,
+      sessionId: ctx.sessionId,
       reason: "approval-required",
       contextKey: `approval:${workerKey}`,
       text: approvalRequiredMessage(signal, this.config.maxWaitMs),
@@ -272,9 +295,11 @@ export class ApprovalHandoffManager {
             pollIntervalMs: this.config.pollIntervalMs,
             maxWaitMs: this.config.maxWaitMs,
             commandTimeoutMs: this.config.commandTimeoutMs,
+            allowMcporterFallback: this.config.allowMcporterFallback,
             reconcile: {
               onValidationError: this.config.reconcileOnValidationError,
               onUnknownTerminal: this.config.reconcileOnUnknownTerminal,
+              onWaitError: this.config.reconcileOnWaitError,
               timeoutMs: this.config.reconcileTimeoutMs,
             },
             signal: state.controller.signal,
@@ -513,6 +538,7 @@ export class ApprovalHandoffManager {
     state.terminalSent = true;
     this.notifier.post({
       sessionKey: state.sessionKey,
+      sessionId: state.sessionId,
       reason: params.reason,
       contextKey: `approval:${state.key}`,
       text: params.text,
@@ -553,6 +579,7 @@ export class ApprovalHandoffManager {
       const reason = String(error);
       this.notifier.post({
         sessionKey: state.sessionKey,
+        sessionId: state.sessionId,
         reason: "approval-resume-failed",
         contextKey: `approval:${state.key}:resume`,
         text: approvalResumeFailedMessage(state.signal, reason),

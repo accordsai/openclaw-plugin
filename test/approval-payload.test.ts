@@ -363,6 +363,96 @@ describe("parseApprovalRequiredResult", () => {
     expect(parsed.signal.runId).toBe("run_abc");
   });
 
+  it("parses approval payload when identifiers are only under pending_approval", () => {
+    const input = {
+      error: {
+        code: "MCP_APPROVAL_REQUIRED",
+        details: {
+          pending_approval: {
+            challenge_id: "ach_pending",
+            pending_id: "apj_pending",
+            run_id: "run_pending",
+            remote_attestation_url: "https://alerts.accords.ai/a/req_pending?t=abc",
+            next_action: {
+              tool: "vaultclaw_approval_wait",
+              arguments: {
+                handle: {
+                  kind: "PLAN_RUN",
+                  run_id: "run_pending",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const parsed = parseApprovalRequiredResult(input);
+    expect(parsed.type).toBe("approval");
+    if (parsed.type !== "approval") {
+      return;
+    }
+    expect(parsed.signal.challengeId).toBe("ach_pending");
+    expect(parsed.signal.pendingId).toBe("apj_pending");
+    expect(parsed.signal.runId).toBe("run_pending");
+    expect(parsed.signal.remoteAttestationURL).toBe("https://alerts.accords.ai/a/req_pending?t=abc");
+  });
+
+  it("parses camelCase approval payload fields from details root", () => {
+    const input = {
+      error: {
+        code: "MCP_APPROVAL_REQUIRED",
+        details: {
+          challengeId: "ach_camel",
+          pendingApprovalId: "apj_camel",
+          jobId: "job_camel",
+          remoteAttestationURL: "https://alerts.accords.ai/a/req_camel?t=abc",
+          nextAction: {
+            toolName: "vaultclaw_approval_wait",
+            args: {
+              handle: {
+                kind: "JOB",
+                jobId: "job_camel",
+                challengeId: "ach_camel",
+                pendingApprovalId: "apj_camel",
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const parsed = parseApprovalRequiredResult(input);
+    expect(parsed.type).toBe("approval");
+    if (parsed.type !== "approval") {
+      return;
+    }
+    expect(parsed.signal.tool).toBe("vaultclaw_approval_wait");
+    expect(parsed.signal.handle.kind).toBe("JOB");
+    expect(parsed.signal.jobId).toBe("job_camel");
+    expect(parsed.signal.challengeId).toBe("ach_camel");
+    expect(parsed.signal.pendingId).toBe("apj_camel");
+  });
+
+  it("recovers approval from truncated text with runId-only fallback", () => {
+    const input = {
+      details: {
+        aggregated:
+          "{\"ok\":false,\"error\":{\"code\":\"MCP_APPROVAL_REQUIRED\",\"details\":{\"approval\":{\"runId\":\"run_only_123\"",
+      },
+    };
+
+    const parsed = parseApprovalRequiredResult(input);
+    expect(parsed.type).toBe("approval");
+    if (parsed.type !== "approval") {
+      return;
+    }
+    expect(parsed.signal.handle.kind).toBe("PLAN_RUN");
+    expect(parsed.signal.runId).toBe("run_only_123");
+    expect(parsed.signal.pendingId).toBeUndefined();
+    expect(parsed.signal.challengeId).toBeUndefined();
+  });
+
   it("does not recover for non-approval errors", () => {
     const input = {
       details: {

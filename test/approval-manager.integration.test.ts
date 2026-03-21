@@ -38,7 +38,7 @@ function createHarness(
   waitImpl: Parameters<typeof vi.fn>[0],
   resumeImpl?: Parameters<typeof vi.fn>[0],
 ) {
-  const notifications: Array<{ text: string; reason: string; sessionKey?: string }> = [];
+  const notifications: Array<{ text: string; reason: string; sessionKey?: string; sessionId?: string }> = [];
   const waitInvoker = vi.fn(waitImpl);
   const resumeInvoker = vi.fn(
     resumeImpl ??
@@ -52,7 +52,12 @@ function createHarness(
     resumeInvoker,
     notifier: {
       post: (entry) => {
-        notifications.push({ text: entry.text, reason: entry.reason, sessionKey: entry.sessionKey });
+        notifications.push({
+          text: entry.text,
+          reason: entry.reason,
+          sessionKey: entry.sessionKey,
+          sessionId: entry.sessionId,
+        });
       },
     },
     logger: {
@@ -68,6 +73,34 @@ function createHarness(
 }
 
 describe("ApprovalHandoffManager integration", () => {
+  it("posts approval-required handoff before wait starts", async () => {
+    let notificationsAtWaitStart = 0;
+    const { manager, notifications } = createHarness(async () => {
+      notificationsAtWaitStart = notifications.length;
+      return {
+        done: true,
+        terminalStatus: "DENIED",
+        decisionOutcome: "DENY",
+        raw: {},
+      };
+    });
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionKey: "agent:main:main",
+        sessionId: "sess-order",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(notificationsAtWaitStart).toBe(1);
+    expect(notifications[0]?.reason).toBe("approval-required");
+  });
+
   it("handles APPROVAL_REQUIRED -> ALLOW", async () => {
     const { manager, notifications, resumeInvoker } = createHarness(async () => ({
       done: true,
@@ -95,6 +128,39 @@ describe("ApprovalHandoffManager integration", () => {
     expect(notifications[0]?.text).toContain("https://alerts.accords.ai/a/req_1?t=abc");
     expect(notifications[1]?.text).toContain("Approval allowed");
     expect(resumeInvoker).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits explicit handoff for direct/TUI session with only sessionId", async () => {
+    const { manager, notifications } = createHarness(async () => ({
+      done: true,
+      terminalStatus: "DENIED",
+      decisionOutcome: "DENY",
+      raw: {},
+    }));
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionId: "0d2f0d3b-66cc-42a2-83fe-d6d39ad631f8",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(notifications.map((entry) => entry.reason)).toEqual([
+      "approval-required",
+      "approval-deny",
+    ]);
+    expect(notifications[0]?.sessionKey).toBeUndefined();
+    expect(notifications[0]?.sessionId).toBe("0d2f0d3b-66cc-42a2-83fe-d6d39ad631f8");
+    expect(notifications[0]?.text).toContain("Approval required in Vaultclaw UI. Waiting up to");
+    expect(notifications[0]?.text).toContain("challenge_id=ach_1");
+    expect(notifications[0]?.text).toContain("pending_id=apj_1");
+    expect(notifications[0]?.text).toContain("run_id=run_1");
+    expect(notifications[0]?.text).toContain("job_id=job_1");
+    expect(notifications[0]?.text).toContain("Attestation link:");
   });
 
   it("handles APPROVAL_REQUIRED -> DENY", async () => {
@@ -184,6 +250,37 @@ describe("ApprovalHandoffManager integration", () => {
     expect(resumeInvoker).toHaveBeenCalledTimes(0);
   });
 
+  it("posts monitoring-failed guidance when wait errors", async () => {
+    const { manager, notifications, resumeInvoker } = createHarness(async () => {
+      throw new WaitCallError({
+        message: "transport failure",
+        code: "TRANSPORT_ERROR",
+        retryable: true,
+        category: "transport",
+      });
+    });
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionKey: "agent:main:main",
+        sessionId: "sess-3c",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(notifications.map((entry) => entry.reason)).toEqual([
+      "approval-required",
+      "approval-error",
+    ]);
+    expect(notifications[1]?.text).toContain("monitoring failed");
+    expect(notifications[1]?.text).toContain("may still complete");
+    expect(resumeInvoker).toHaveBeenCalledTimes(0);
+  });
+
   it("posts resume failure guidance after ALLOW when auto-resume fails", async () => {
     const { manager, notifications, resumeInvoker } = createHarness(
       async () => ({
@@ -218,10 +315,10 @@ describe("ApprovalHandoffManager integration", () => {
     expect(resumeInvoker).toHaveBeenCalledTimes(1);
   });
 
-  it("deduplicates duplicate approval events", async () => {
+  it("deduplicates duplicate approval events without repeating handoff message", async () => {
     let resolveWait: ((result: WaitSuccess) => void) | undefined;
 
-    const { manager, waitInvoker } = createHarness(
+    const { manager, waitInvoker, notifications } = createHarness(
       async ({ signal }) =>
         await new Promise<WaitSuccess>((resolve, reject) => {
           resolveWait = resolve;
@@ -261,6 +358,7 @@ describe("ApprovalHandoffManager integration", () => {
     );
 
     expect(waitInvoker).toHaveBeenCalledTimes(1);
+    expect(notifications.filter((entry) => entry.reason === "approval-required")).toHaveLength(1);
     resolveWait?.({
       done: true,
       terminalStatus: "SUCCEEDED",
@@ -310,5 +408,34 @@ describe("ApprovalHandoffManager integration", () => {
     await manager.waitForIdle();
     expect(notifications.map((entry) => entry.reason)).toEqual(["approval-required"]);
     expect(manager.activeWorkerCount()).toBe(0);
+  });
+
+  it("suppresses non-actionable invalid approval payload warnings", async () => {
+    const { manager, notifications, waitInvoker } = createHarness(async () => ({
+      done: true,
+      terminalStatus: "SUCCEEDED",
+      decisionOutcome: "ALLOW",
+      raw: {},
+    }));
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: {
+          details: {
+            aggregated:
+              "{\"ok\":false,\"error\":{\"code\":\"MCP_APPROVAL_REQUIRED\",\"details\":{\"approval\":{\"challenge_id\":\"ach_only\"",
+          },
+        },
+      },
+      {
+        sessionKey: "agent:main:main",
+        sessionId: "sess-invalid-suppressed",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(waitInvoker).not.toHaveBeenCalled();
+    expect(notifications).toHaveLength(0);
   });
 });

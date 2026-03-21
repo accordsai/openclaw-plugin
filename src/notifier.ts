@@ -12,11 +12,14 @@ const CHAT_TYPES = new Set(["direct", "group", "channel", "dm"]);
 
 export function createApprovalNotifier(api: Pick<OpenClawPluginApi, "runtime" | "logger">): ApprovalNotifier {
   return {
-    post: ({ sessionKey, text, reason, contextKey }) => {
-      const scopedSessionKey = sessionKey?.trim();
-      if (!scopedSessionKey) {
+    post: ({ sessionKey, sessionId, text, reason, contextKey }) => {
+      const scopedSessionId = sessionId?.trim();
+      const scopedSessionKey =
+        sessionKey?.trim() ||
+        (scopedSessionId?.startsWith("agent:") ? scopedSessionId : undefined);
+      if (!scopedSessionKey && !scopedSessionId) {
         api.logger.warn(
-          `[vaultclaw-approval-handoff] skipped notification with no sessionKey: ${text}`,
+          `[vaultclaw-approval-handoff] skipped notification with no sessionKey/sessionId: ${text}`,
         );
         return;
       }
@@ -24,10 +27,16 @@ export function createApprovalNotifier(api: Pick<OpenClawPluginApi, "runtime" | 
       const fallback = createFallbackNotifier({
         api,
         sessionKey: scopedSessionKey,
+        sessionId: scopedSessionId,
         text,
         reason,
         contextKey,
       });
+
+      if (!scopedSessionKey) {
+        fallback();
+        return;
+      }
 
       const target = parseChannelTargetFromSessionKey(scopedSessionKey);
       if (!target) {
@@ -132,34 +141,54 @@ function tryDirectChannelSend(params: {
 
 function createFallbackNotifier(params: {
   api: Pick<OpenClawPluginApi, "runtime" | "logger">;
-  sessionKey: string;
+  sessionKey?: string;
+  sessionId?: string;
   text: string;
   reason: string;
   contextKey?: string;
 }) {
   let used = false;
+  const sessionCandidates = Array.from(
+    new Set([params.sessionKey?.trim(), params.sessionId?.trim()].filter((value): value is string => Boolean(value))),
+  );
   return () => {
     if (used) {
       return;
     }
     used = true;
-    try {
-      params.api.runtime.system.enqueueSystemEvent(params.text, {
-        sessionKey: params.sessionKey,
-        contextKey: params.contextKey,
-      });
-      const requestHeartbeatNow = params.api.runtime?.system?.requestHeartbeatNow;
-      if (typeof requestHeartbeatNow === "function") {
-        requestHeartbeatNow({
-          reason: `vaultclaw-approval-handoff:${params.reason}`,
-          sessionKey: params.sessionKey,
-        });
-      }
-    } catch (error) {
+    if (sessionCandidates.length === 0) {
       params.api.logger.warn(
-        `[vaultclaw-approval-handoff] failed to enqueue system event: ${String(error)}`,
+        `[vaultclaw-approval-handoff] failed to enqueue system event with no session candidates`,
       );
+      return;
     }
+
+    for (const sessionKey of sessionCandidates) {
+      try {
+        const enqueued = params.api.runtime.system.enqueueSystemEvent(params.text, {
+          sessionKey,
+          contextKey: params.contextKey,
+        });
+        if (!enqueued) {
+          continue;
+        }
+        const requestHeartbeatNow = params.api.runtime?.system?.requestHeartbeatNow;
+        if (typeof requestHeartbeatNow === "function") {
+          requestHeartbeatNow({
+            reason: `vaultclaw-approval-handoff:${params.reason}`,
+            sessionKey,
+          });
+        }
+        return;
+      } catch (error) {
+        params.api.logger.warn(
+          `[vaultclaw-approval-handoff] failed to enqueue system event for session candidate ${sessionKey}: ${String(error)}`,
+        );
+      }
+    }
+    params.api.logger.warn(
+      `[vaultclaw-approval-handoff] failed to enqueue system event for all session candidates`,
+    );
   };
 }
 

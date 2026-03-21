@@ -152,6 +152,7 @@ describe("createGatewayToolsInvokeWaitInvoker reconciliation", () => {
       reconcile: {
         onValidationError: true,
         onUnknownTerminal: true,
+        onWaitError: true,
         timeoutMs: 5000,
       },
     });
@@ -211,6 +212,7 @@ describe("createGatewayToolsInvokeWaitInvoker reconciliation", () => {
       reconcile: {
         onValidationError: true,
         onUnknownTerminal: true,
+        onWaitError: true,
         timeoutMs: 5000,
       },
     });
@@ -270,6 +272,7 @@ describe("createGatewayToolsInvokeWaitInvoker reconciliation", () => {
         reconcile: {
           onValidationError: true,
           onUnknownTerminal: true,
+          onWaitError: true,
           timeoutMs: 5000,
         },
       }),
@@ -326,6 +329,7 @@ describe("createGatewayToolsInvokeWaitInvoker reconciliation", () => {
       reconcile: {
         onValidationError: true,
         onUnknownTerminal: true,
+        onWaitError: true,
         timeoutMs: 5000,
       },
     });
@@ -334,5 +338,124 @@ describe("createGatewayToolsInvokeWaitInvoker reconciliation", () => {
     expect(result.decisionOutcome).toBe("ALLOW");
     expect(result.terminalStatus).toBe("SUCCEEDED");
     expect((result.raw as Record<string, unknown>).source).toBe("reconcile_job_get");
+  });
+
+  it("reconciles transport wait failure when reconcileOnWaitError is enabled", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const tool = String(body.tool ?? "");
+      if (tool === "vaultclaw_approval_wait") {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: {
+              code: "TRANSPORT_ERROR",
+              message: "gateway unavailable",
+            },
+          }),
+          {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      if (tool === "vaultclaw_approvals_pending_get") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: {
+              ok: true,
+              result: {
+                ok: true,
+                data: {
+                  item: { state: "SUCCEEDED" },
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      throw new Error(`unexpected tool ${tool}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await makeInvoker()({
+      sessionKey: "agent:main:main",
+      handle: {
+        kind: "PLAN_RUN",
+        challenge_id: "ach_5",
+        pending_id: "apj_5",
+        run_id: "run_5",
+        job_id: "job_5",
+      },
+      pollIntervalMs: 1500,
+      maxWaitMs: 10000,
+      commandTimeoutMs: 20000,
+      reconcile: {
+        onValidationError: true,
+        onUnknownTerminal: true,
+        onWaitError: true,
+        timeoutMs: 5000,
+      },
+    });
+
+    expect(result.done).toBe(true);
+    expect(result.decisionOutcome).toBe("ALLOW");
+    expect(result.terminalStatus).toBe("SUCCEEDED");
+    expect((result.raw as Record<string, unknown>).source).toBe("reconcile_pending_get");
+  });
+
+  it("does not reconcile transport wait failure when reconcileOnWaitError is disabled", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const tool = String(body.tool ?? "");
+      if (tool === "vaultclaw_approval_wait") {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: {
+              code: "TRANSPORT_ERROR",
+              message: "gateway unavailable",
+            },
+          }),
+          {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      throw new Error(`unexpected tool ${tool}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      makeInvoker()({
+        sessionKey: "agent:main:main",
+        handle: {
+          kind: "PLAN_RUN",
+          challenge_id: "ach_6",
+          pending_id: "apj_6",
+          run_id: "run_6",
+          job_id: "job_6",
+        },
+        pollIntervalMs: 1500,
+        maxWaitMs: 10000,
+        commandTimeoutMs: 20000,
+        reconcile: {
+          onValidationError: true,
+          onUnknownTerminal: true,
+          onWaitError: false,
+          timeoutMs: 5000,
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "WaitCallError",
+      category: "transport",
+      retryable: true,
+    });
   });
 });

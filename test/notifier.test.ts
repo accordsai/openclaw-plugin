@@ -147,6 +147,47 @@ describe("createApprovalNotifier", () => {
     expect(harness.requestHeartbeatNow).toHaveBeenCalledTimes(1);
   });
 
+  it("uses sessionId as a best-effort system-event target when sessionKey is missing", () => {
+    const harness = createHarness();
+    harness.notifier.post({
+      sessionId: "0d2f0d3b-66cc-42a2-83fe-d6d39ad631f8",
+      reason: "approval-required",
+      text: "Approval required",
+      contextKey: "approval:abc",
+    });
+
+    expect(harness.sendMessageTelegram).not.toHaveBeenCalled();
+    expect(harness.sendMessageWhatsApp).not.toHaveBeenCalled();
+    expect(harness.enqueueSystemEvent).toHaveBeenCalledTimes(1);
+    expect(harness.enqueueSystemEvent).toHaveBeenCalledWith("Approval required", {
+      sessionKey: "0d2f0d3b-66cc-42a2-83fe-d6d39ad631f8",
+      contextKey: "approval:abc",
+    });
+    expect(harness.requestHeartbeatNow).toHaveBeenCalledTimes(1);
+    expect(harness.requestHeartbeatNow).toHaveBeenCalledWith({
+      reason: "vaultclaw-approval-handoff:approval-required",
+      sessionKey: "0d2f0d3b-66cc-42a2-83fe-d6d39ad631f8",
+    });
+  });
+
+  it("uses agent-style sessionId for direct channel send when sessionKey is missing", async () => {
+    const harness = createHarness();
+    harness.notifier.post({
+      sessionId: "agent:main:telegram:default:direct:509928323",
+      reason: "approval-required",
+      text: "Approval required",
+      contextKey: "approval:abc",
+    });
+
+    await Promise.resolve();
+    expect(harness.sendMessageTelegram).toHaveBeenCalledTimes(1);
+    expect(harness.sendMessageTelegram).toHaveBeenCalledWith("509928323", "Approval required", {
+      accountId: "default",
+      plainText: "Approval required",
+    });
+    expect(harness.enqueueSystemEvent).not.toHaveBeenCalled();
+  });
+
   it("falls back to system event when direct telegram send fails", async () => {
     const harness = createHarness({
       sendMessageTelegram: async () => {
