@@ -93,5 +93,5 @@ export function approvalUnknownTerminalMessage(signal: ApprovalSignal, wait: Wai
 }
 
 export function approvalWaitErrorMessage(signal: ApprovalSignal, reason: string): string {
-  return `Approval auto-wait failed: ${reason}.${formatIds(signal)}`;
+  return `Approval monitoring failed before a terminal decision was observed: ${reason}. The underlying action may still complete. Check Vaultclaw status and, if needed, retry with the same handle using vaultclaw_approval_wait.${formatIds(signal)}${formatAttestationLink(signal)}`;
 }

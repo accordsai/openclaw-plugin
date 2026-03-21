@@ -56,6 +56,38 @@ function readIdentifier(value: unknown): string | undefined {
   return normalizeIdentifier(readString(value));
 }
 
+function readStringFromRecord(
+  record: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = readString(record[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readIdentifierFromRecord(
+  record: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = readIdentifier(record[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function extractMcpErrorPayloadFromRecord(root: Record<string, unknown>): McpErrorPayload | undefined {
   const directError = asRecord(root.error);
   if (directError && typeof directError.code === "string") {
@@ -365,11 +397,25 @@ function recoverApprovalFromRaw(input: unknown): RecoveredApproval {
     }
 
     recovered.found = true;
-    recovered.challengeId ??= extractIdFromText(text, "challenge_id");
-    recovered.pendingId ??= extractIdFromText(text, "pending_id");
-    recovered.runId ??= extractIdFromText(text, "run_id");
-    recovered.jobId ??= extractIdFromText(text, "job_id");
-    recovered.remoteAttestationURL ??= extractURLFromText(text, "remote_attestation_url");
+    recovered.challengeId ??=
+      extractIdFromText(text, "challenge_id") ??
+      extractIdFromText(text, "challengeId");
+    recovered.pendingId ??=
+      extractIdFromText(text, "pending_id") ??
+      extractIdFromText(text, "pendingId") ??
+      extractIdFromText(text, "pending_approval_id") ??
+      extractIdFromText(text, "pendingApprovalId");
+    recovered.runId ??=
+      extractIdFromText(text, "run_id") ??
+      extractIdFromText(text, "runId") ??
+      extractIdFromText(text, "plan_run_id") ??
+      extractIdFromText(text, "planRunId");
+    recovered.jobId ??=
+      extractIdFromText(text, "job_id") ??
+      extractIdFromText(text, "jobId");
+    recovered.remoteAttestationURL ??=
+      extractURLFromText(text, "remote_attestation_url") ??
+      extractURLFromText(text, "remoteAttestationURL");
   }
 
   return recovered;
@@ -411,11 +457,7 @@ function buildSignal(params: {
 }
 
 function hasRecoverableHandle(recovered: RecoveredApproval): boolean {
-  return Boolean(
-    recovered.challengeId &&
-      recovered.pendingId &&
-      (recovered.runId || recovered.jobId),
-  );
+  return Boolean(recovered.runId || recovered.jobId);
 }
 
 function buildRecoveredSignal(recovered: RecoveredApproval): ApprovalSignal {
@@ -496,7 +538,9 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
   }
 
   const details = payload.details;
-  const approval = asRecord(details?.approval);
+  const detailsPendingApproval =
+    asRecord(details?.pending_approval) ?? asRecord(details?.pendingApproval);
+  const approval = asRecord(details?.approval) ?? detailsPendingApproval ?? details;
   if (!approval) {
     if (hasRecoverableHandle(recovered)) {
       return { type: "approval", signal: buildRecoveredSignal(recovered) };
@@ -510,20 +554,53 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
     });
   }
 
-  const challengeId = readIdentifier(approval.challenge_id) ?? recovered.challengeId;
-  const pendingId = readIdentifier(approval.pending_id) ?? recovered.pendingId;
-  const runIdFromApproval = readIdentifier(approval.run_id) ?? recovered.runId;
-  const jobIdFromApproval = readIdentifier(approval.job_id) ?? recovered.jobId;
-  const pendingApproval = asRecord(approval.pending_approval);
+  const pendingApproval =
+    asRecord(approval.pending_approval) ??
+    asRecord(approval.pendingApproval) ??
+    detailsPendingApproval;
+  const challengeId =
+    readIdentifierFromRecord(approval, ["challenge_id", "challengeId"]) ??
+    readIdentifierFromRecord(pendingApproval, ["challenge_id", "challengeId"]) ??
+    recovered.challengeId;
+  const pendingId =
+    readIdentifierFromRecord(approval, [
+      "pending_id",
+      "pendingId",
+      "pending_approval_id",
+      "pendingApprovalId",
+    ]) ??
+    readIdentifierFromRecord(pendingApproval, [
+      "pending_id",
+      "pendingId",
+      "pending_approval_id",
+      "pendingApprovalId",
+    ]) ??
+    recovered.pendingId;
+  const runIdFromApproval =
+    readIdentifierFromRecord(approval, ["run_id", "runId", "plan_run_id", "planRunId"]) ??
+    readIdentifierFromRecord(pendingApproval, ["run_id", "runId", "plan_run_id", "planRunId"]) ??
+    recovered.runId;
+  const jobIdFromApproval =
+    readIdentifierFromRecord(approval, ["job_id", "jobId"]) ??
+    readIdentifierFromRecord(pendingApproval, ["job_id", "jobId"]) ??
+    recovered.jobId;
   const remoteAttestationURL =
-    normalizeURL(readString(approval.remote_attestation_url)) ??
-    normalizeURL(readString(pendingApproval?.remote_attestation_url)) ??
+    normalizeURL(
+      readStringFromRecord(approval, ["remote_attestation_url", "remoteAttestationURL"]),
+    ) ??
+    normalizeURL(
+      readStringFromRecord(pendingApproval, ["remote_attestation_url", "remoteAttestationURL"]),
+    ) ??
     recovered.remoteAttestationURL;
   const remoteAttestationLinkMarkdown =
-    readString(approval.remote_attestation_link_markdown) ??
+    readStringFromRecord(approval, ["remote_attestation_link_markdown", "remoteAttestationLinkMarkdown"]) ??
     (remoteAttestationURL ? `[${remoteAttestationURL}](${remoteAttestationURL})` : undefined);
 
-  const nextAction = asRecord(approval.next_action);
+  const nextAction =
+    asRecord(approval.next_action) ??
+    asRecord(approval.nextAction) ??
+    asRecord(pendingApproval?.next_action) ??
+    asRecord(pendingApproval?.nextAction);
   if (!nextAction) {
     if (hasRecoverableHandle({
       found: true,
@@ -552,10 +629,12 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
     });
   }
 
-  const tool = readString(nextAction.tool) ?? FALLBACK_WAIT_TOOL;
+  const tool =
+    readStringFromRecord(nextAction, ["tool", "tool_name", "toolName"]) ??
+    FALLBACK_WAIT_TOOL;
 
-  const args = asRecord(nextAction.arguments);
-  const handleRaw = asRecord(args?.handle);
+  const args = asRecord(nextAction.arguments) ?? asRecord(nextAction.args);
+  const handleRaw = asRecord(args?.handle) ?? asRecord(nextAction.handle);
   if (!handleRaw) {
     if (hasRecoverableHandle({
       found: true,
@@ -584,9 +663,13 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
     });
   }
 
-  let kind = normalizeHandleKind(handleRaw.kind);
-  const runId = readIdentifier(handleRaw.run_id) ?? runIdFromApproval;
-  const jobId = readIdentifier(handleRaw.job_id) ?? jobIdFromApproval;
+  let kind =
+    normalizeHandleKind(handleRaw.kind) ??
+    normalizeHandleKind(readStringFromRecord(handleRaw, ["handle_kind", "handleKind"]));
+  const runId =
+    readIdentifierFromRecord(handleRaw, ["run_id", "runId", "plan_run_id", "planRunId"]) ??
+    runIdFromApproval;
+  const jobId = readIdentifierFromRecord(handleRaw, ["job_id", "jobId"]) ?? jobIdFromApproval;
   if (!kind) {
     kind = runId ? "PLAN_RUN" : jobId ? "JOB" : undefined;
   }
@@ -621,8 +704,14 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
 
   const handle: ApprovalHandle = {
     kind,
-    challenge_id: readIdentifier(handleRaw.challenge_id) ?? challengeId,
-    pending_id: readIdentifier(handleRaw.pending_id) ?? pendingId,
+    challenge_id: readIdentifierFromRecord(handleRaw, ["challenge_id", "challengeId"]) ?? challengeId,
+    pending_id:
+      readIdentifierFromRecord(handleRaw, [
+        "pending_id",
+        "pendingId",
+        "pending_approval_id",
+        "pendingApprovalId",
+      ]) ?? pendingId,
     run_id: runId,
     job_id: jobId,
   };

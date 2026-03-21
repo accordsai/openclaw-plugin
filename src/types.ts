@@ -25,9 +25,33 @@ export type ApprovalHandoffConfig = {
   maxWaitMs: number;
   commandTimeoutMs: number;
   maxConcurrentWaits: number;
+  allowMcporterFallback: boolean;
   reconcileOnValidationError: boolean;
   reconcileOnUnknownTerminal: boolean;
+  reconcileOnWaitError: boolean;
   reconcileTimeoutMs: number;
+};
+
+export type VaultCommandMode = "hybrid" | "strict";
+
+export type VaultCommandConfig = {
+  enabled: boolean;
+  defaultEnabled: boolean;
+  defaultMode: VaultCommandMode;
+  autoDisableTelegramNativeCommands: boolean;
+  sessionModeTtlMs: number;
+  maxConcurrentRuns: number;
+  enableCoreFallback: boolean;
+  coreFallbackTimeoutMs: number;
+  resolverTool: string;
+  resolverTimeoutMs: number;
+  enrichmentGlobalTimeoutMs: number;
+  enrichmentTaskTimeoutMs: number;
+  deterministicDomains: string[];
+};
+
+export type PluginConfig = ApprovalHandoffConfig & {
+  vaultCommand: VaultCommandConfig;
 };
 
 export type CorrelationKeys = {
@@ -70,6 +94,7 @@ export class WaitCallError extends Error {
 export type ReconcileOptions = {
   onValidationError: boolean;
   onUnknownTerminal: boolean;
+  onWaitError: boolean;
   timeoutMs: number;
 };
 
@@ -79,6 +104,7 @@ export type WaitInvoker = (params: {
   pollIntervalMs: number;
   maxWaitMs: number;
   commandTimeoutMs: number;
+  allowMcporterFallback?: boolean;
   reconcile?: ReconcileOptions;
   signal?: AbortSignal;
 }) => Promise<WaitSuccess>;
@@ -91,6 +117,7 @@ export type ResumeInvoker = (params: {
 export type ApprovalNotifier = {
   post: (params: {
     sessionKey?: string;
+    sessionId?: string;
     text: string;
     reason: string;
     contextKey?: string;

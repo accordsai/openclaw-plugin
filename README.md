@@ -2,6 +2,9 @@
 
 OpenClaw plugin that auto-handles Vaultclaw MCP approval handoff during agent tool runs.
 
+Primary supported backend path: OpenClaw Gateway `POST /tools/invoke` against direct `vaultclaw_*`
+tools exposed by plugin id `vaultclaw-openclaw-bridge`.
+
 When a tool returns `MCP_APPROVAL_REQUIRED`, the plugin:
 
 - extracts `error.details.approval.next_action.arguments.handle`
@@ -12,6 +15,13 @@ When a tool returns `MCP_APPROVAL_REQUIRED`, the plugin:
   compound flows continue without a manual "approved" message
 
 No second manual CLI command is required.
+
+## Responsibility Split
+
+| Component | Responsibility |
+| --- | --- |
+| `vaultclaw-openclaw-bridge` | Exposes direct `vaultclaw_*` tools inside OpenClaw. |
+| `vaultclaw-mcp-approval-handoff` | Handles `MCP_APPROVAL_REQUIRED`, waits, posts terminal outcome, and auto-resumes on `ALLOW`. |
 
 ## Install
 
@@ -49,9 +59,29 @@ Plugin id: `vaultclaw-mcp-approval-handoff`
           "maxWaitMs": 600000,
           "commandTimeoutMs": 720000,
           "maxConcurrentWaits": 10,
+          "allowMcporterFallback": false,
           "reconcileOnValidationError": true,
           "reconcileOnUnknownTerminal": true,
-          "reconcileTimeoutMs": 15000
+          "reconcileOnWaitError": true,
+          "reconcileTimeoutMs": 15000,
+          "vaultCommand": {
+            "enabled": true,
+            "defaultEnabled": true,
+            "defaultMode": "hybrid",
+            "autoDisableTelegramNativeCommands": true,
+            "sessionModeTtlMs": 604800000,
+            "maxConcurrentRuns": 5,
+            "enableCoreFallback": true,
+            "coreFallbackTimeoutMs": 30000,
+            "resolverTool": "vaultclaw_route_resolve",
+            "resolverTimeoutMs": 8000,
+            "enrichmentGlobalTimeoutMs": 10000,
+            "enrichmentTaskTimeoutMs": 6000,
+            "deterministicDomains": [
+              "google.gmail",
+              "generic.http"
+            ]
+          }
         }
       }
     }
@@ -66,6 +96,33 @@ Validation rules:
 - `commandTimeoutMs > maxWaitMs`
 - `maxConcurrentWaits >= 1`
 - `reconcileTimeoutMs`: `1000..60000`
+- `vaultCommand.enrichmentGlobalTimeoutMs`: `1000..60000`
+- `vaultCommand.enrichmentTaskTimeoutMs`: `1000..60000` and `<= enrichmentGlobalTimeoutMs`
+
+Legacy note:
+
+- `allowMcporterFallback` is a deprecated escape hatch for older stacks and is not recommended.
+- Keep `allowMcporterFallback=false` for the standard bridge-based runtime path.
+
+## Deterministic `/vault` Command
+
+When enabled, the plugin registers `/vault`:
+
+- `/vault on [hybrid|strict]`
+- `/vault off`
+- `/vault status`
+- `/vault <natural language request>`
+
+Mode semantics:
+
+- `HYBRID` (default): vault-eligible requests use deterministic route/execute; non-eligible requests auto-fallback to normal OpenClaw flow.
+- `STRICT`: vault-eligible requests only; non-eligible requests are rejected with guidance.
+
+Resolver requirement:
+
+- `/vault` deterministic path requires MCP tool `vaultclaw_route_resolve` (from updated `accords-mcp`).
+- During missing-input enrichment flows, the plugin shows a short progress update based on MCP `progress_hint` before auto-enrichment tasks begin.
+- For Telegram deployments, the plugin can auto-set `channels.telegram.commands.native=false` at startup (`vaultCommand.autoDisableTelegramNativeCommands=true`) to avoid intermittent native slash-command misses that can surface as `Command not found.` before plugin routing.
 
 ## Behavior
 
@@ -77,6 +134,8 @@ Validation rules:
 - Retries: transient transport failures retry with backoff (`1s, 2s, 4s, 8s, 16s`, max 5 attempts).
 - No-retry terminal categories: validation/auth/timeouts.
 - Reconciliation: when wait payloads are malformed or terminal status is unknown, plugin attempts read-only reconciliation through `vaultclaw_approvals_pending_get` and `vaultclaw_job_get`.
+- Reconciliation on wait failure: transient wait transport failures can trigger a read-only reconciliation check before surfacing terminal error guidance.
+- Legacy mcporter fallback remains opt-in (`allowMcporterFallback=true`) but is deprecated; standard behavior uses Gateway `/tools/invoke` only.
 - Unknown terminal outcomes are surfaced explicitly (not as timeout) with retry guidance.
 - If `ALLOW` is confirmed but auto-resume fails, plugin posts a manual fallback instruction (`reply approved` or rerun request).
 
