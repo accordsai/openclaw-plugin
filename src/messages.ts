@@ -1,4 +1,4 @@
-import type { ApprovalSignal, WaitSuccess } from "./types.js";
+import type { ApprovalSignal, CompletionProbeResult, WaitSuccess } from "./types.js";
 
 function formatIds(signal: ApprovalSignal): string {
   const parts: string[] = [];
@@ -73,6 +73,31 @@ function summarizeAllow(wait: WaitSuccess): string {
 
 export function approvalAllowMessage(signal: ApprovalSignal, wait: WaitSuccess): string {
   return `Approval allowed in Vaultclaw UI. Continuing automatically.${formatIds(signal)}${summarizeAllow(wait)}`;
+}
+
+export function approvalCompletedMessage(signal: ApprovalSignal, completion: CompletionProbeResult): string {
+  const details: string[] = [];
+  if (completion.terminalStatus) {
+    details.push(`terminal_status=${completion.terminalStatus}`);
+  }
+  if (completion.decisionOutcome) {
+    details.push(`decision_outcome=${completion.decisionOutcome}`);
+  }
+  if (completion.executedSteps !== undefined) {
+    details.push(`executed_steps=${completion.executedSteps}`);
+  }
+  if (completion.lastStep) {
+    details.push(`last_step=${completion.lastStep}`);
+  }
+  if (completion.runId) {
+    details.push(`run_id=${completion.runId}`);
+  }
+  if (completion.jobId) {
+    details.push(`job_id=${completion.jobId}`);
+  }
+
+  const suffix = details.length > 0 ? ` (${details.join(", ")})` : formatIds(signal);
+  return `Done - approval processed and Vault action completed successfully.${suffix}`;
 }
 
 export function approvalResumeFailedMessage(signal: ApprovalSignal, reason: string): string {

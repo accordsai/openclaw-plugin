@@ -27,5 +27,21 @@ openclaw config set "plugins.entries.$PLUGIN_ID.config.maxWaitMs" 600000
 openclaw config set "plugins.entries.$PLUGIN_ID.config.commandTimeoutMs" 720000
 openclaw config set "plugins.entries.$PLUGIN_ID.config.maxConcurrentWaits" 10
 
+echo "Applying OpenClaw core patch for Telegram plugin command stability..."
+node "$SCRIPT_DIR/patch-openclaw-core.mjs"
+
+echo "Restarting OpenClaw gateway to apply plugin + core patch updates..."
+if ! openclaw gateway restart; then
+  echo "Gateway restart failed; attempting install/start recovery..."
+  openclaw gateway install --json >/dev/null 2>&1 || true
+  openclaw gateway start >/dev/null 2>&1 || true
+fi
+
+if openclaw gateway health >/dev/null 2>&1; then
+  echo "Gateway health check: OK"
+else
+  echo "Gateway health check could not be confirmed. Run: openclaw gateway status"
+fi
+
 echo "Plugin installed and configured: $PLUGIN_ID"
-echo "Restart the gateway to apply config if it is already running: openclaw gateway restart"
+echo "Install complete."

@@ -4,6 +4,7 @@ import { buildApprovalWorkerKey } from "./dedupe.js";
 import { logStructured } from "./logging.js";
 import {
   approvalAllowMessage,
+  approvalCompletedMessage,
   approvalDenyMessage,
   approvalResumeFailedMessage,
   approvalRequiredMessage,
@@ -22,6 +23,7 @@ import type {
   WaitCallError,
   WaitInvoker,
   WaitSuccess,
+  CompletionProbe,
 } from "./types.js";
 
 type ToolEvent = {
@@ -33,7 +35,11 @@ type ToolEvent = {
 type ToolContext = {
   sessionId?: string;
   sessionKey?: string;
+  deliverySessionId?: string;
+  deliverySessionKey?: string;
+  deliveryTargetReason?: string;
   runId?: string;
+  skipInitialRequiredNotification?: boolean;
 };
 
 type SessionContext = {
@@ -44,11 +50,93 @@ type SessionContext = {
 type WorkerState = {
   key: string;
   signal: ApprovalSignal;
-  sessionId?: string;
-  sessionKey?: string;
+  executionSessionId?: string;
+  executionSessionKey?: string;
+  deliverySessionId?: string;
+  deliverySessionKey?: string;
   controller: AbortController;
   terminalSent: boolean;
 };
+
+const CHANNEL_SESSION_KINDS = new Set([
+  "telegram",
+  "whatsapp",
+  "discord",
+  "slack",
+  "webchat",
+  "signal",
+  "imessage",
+  "googlechat",
+  "irc",
+  "line",
+  "msteams",
+]);
+
+type SessionTarget = {
+  sessionId?: string;
+  sessionKey?: string;
+};
+
+function normalizeSessionId(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeSessionKey(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function deriveSessionKeyFromSessionId(sessionId: string | undefined): string | undefined {
+  const normalized = normalizeSessionId(sessionId);
+  return normalized?.startsWith("agent:") ? normalized : undefined;
+}
+
+function resolveExecutionTarget(ctx: ToolContext): SessionTarget {
+  const sessionKey = normalizeSessionKey(ctx.sessionKey) ?? deriveSessionKeyFromSessionId(ctx.sessionId);
+  const sessionId = normalizeSessionId(ctx.sessionId) ?? sessionKey;
+  return {
+    sessionKey,
+    sessionId,
+  };
+}
+
+function resolveDeliveryTarget(ctx: ToolContext, execution: SessionTarget): SessionTarget {
+  const sessionKey =
+    normalizeSessionKey(ctx.deliverySessionKey) ??
+    normalizeSessionKey(execution.sessionKey) ??
+    deriveSessionKeyFromSessionId(ctx.deliverySessionId);
+  const sessionId =
+    normalizeSessionId(ctx.deliverySessionId) ??
+    normalizeSessionId(execution.sessionId) ??
+    sessionKey;
+  return {
+    sessionKey,
+    sessionId,
+  };
+}
+
+function classifyDeliveryTarget(target: SessionTarget): string {
+  const key = target.sessionKey;
+  if (!key) {
+    return target.sessionId ? "session-id-only" : "unknown";
+  }
+  const parts = key.split(":");
+  if (parts.length < 3 || parts[0]?.toLowerCase() !== "agent") {
+    return "non-agent-session";
+  }
+  const kind = parts[2]?.toLowerCase() ?? "";
+  if (kind === "main") {
+    return "local-main";
+  }
+  if (kind.startsWith("main-fresh-")) {
+    return "ephemeral-main-fresh";
+  }
+  if (CHANNEL_SESSION_KINDS.has(kind)) {
+    return `channel:${kind}`;
+  }
+  return `agent:${kind || "unknown"}`;
+}
 
 function hasActionableInvalidIdentifiers(parsed: {
   runId?: string;
@@ -61,6 +149,7 @@ export class ApprovalHandoffManager {
   private readonly config: ApprovalHandoffConfig;
   private readonly waitInvoker: WaitInvoker;
   private readonly resumeInvoker?: ResumeInvoker;
+  private readonly completionProbe?: CompletionProbe;
   private readonly notifier: ApprovalNotifier;
   private readonly logger: StructuredLogger;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -72,6 +161,7 @@ export class ApprovalHandoffManager {
     config: ApprovalHandoffConfig;
     waitInvoker: WaitInvoker;
     resumeInvoker?: ResumeInvoker;
+    completionProbe?: CompletionProbe;
     notifier: ApprovalNotifier;
     logger: StructuredLogger;
     sleep?: (ms: number) => Promise<void>;
@@ -79,6 +169,7 @@ export class ApprovalHandoffManager {
     this.config = params.config;
     this.waitInvoker = params.waitInvoker;
     this.resumeInvoker = params.resumeInvoker;
+    this.completionProbe = params.completionProbe;
     this.notifier = params.notifier;
     this.logger = params.logger;
     this.sleep =
@@ -93,6 +184,10 @@ export class ApprovalHandoffManager {
       return;
     }
 
+    const executionTarget = resolveExecutionTarget(ctx);
+    const deliveryTarget = resolveDeliveryTarget(ctx, executionTarget);
+    const executionCorrelationId = executionTarget.sessionId ?? executionTarget.sessionKey;
+
     const parsed = parseApprovalRequiredResult(event.result);
     if (parsed.type === "not_approval") {
       return;
@@ -100,7 +195,7 @@ export class ApprovalHandoffManager {
 
     if (parsed.type === "invalid") {
       const correlation: CorrelationKeys = {
-        session_id: ctx.sessionId ?? ctx.sessionKey,
+        session_id: executionCorrelationId,
         challenge_id: parsed.challengeId,
         pending_id: parsed.pendingId,
         run_id: parsed.runId,
@@ -127,8 +222,8 @@ export class ApprovalHandoffManager {
         return;
       }
       this.notifier.post({
-        sessionKey: ctx.sessionKey,
-        sessionId: ctx.sessionId,
+        sessionKey: deliveryTarget.sessionKey,
+        sessionId: deliveryTarget.sessionId,
         reason: "approval-invalid",
         text: invalidApprovalPayloadMessage({
           reason: parsed.message,
@@ -143,14 +238,32 @@ export class ApprovalHandoffManager {
 
     const signal = parsed.signal;
     const workerKey = buildApprovalWorkerKey({
-      sessionId: ctx.sessionId ?? ctx.sessionKey,
+      sessionId: executionCorrelationId,
       challengeId: signal.challengeId,
       pendingId: signal.pendingId,
       runId: signal.runId,
       jobId: signal.jobId,
     });
 
-    const correlation = this.correlation(signal, ctx.sessionId ?? ctx.sessionKey);
+    const correlation = this.correlation(signal, executionCorrelationId);
+    const sameTarget =
+      executionTarget.sessionKey === deliveryTarget.sessionKey &&
+      executionTarget.sessionId === deliveryTarget.sessionId;
+    logStructured({
+      logger: this.logger,
+      level: "info",
+      event: "approval_delivery_target_selected",
+      correlation,
+      extra: {
+        execution_session_key: executionTarget.sessionKey,
+        execution_session_id: executionTarget.sessionId,
+        delivery_session_key: deliveryTarget.sessionKey,
+        delivery_session_id: deliveryTarget.sessionId,
+        delivery_target_kind: classifyDeliveryTarget(deliveryTarget),
+        selection_reason: ctx.deliveryTargetReason ?? "unspecified",
+        same_target: sameTarget,
+      },
+    });
     logStructured({
       logger: this.logger,
       level: "info",
@@ -174,8 +287,8 @@ export class ApprovalHandoffManager {
 
     if (this.workers.size >= this.config.maxConcurrentWaits) {
       this.notifier.post({
-        sessionKey: ctx.sessionKey,
-        sessionId: ctx.sessionId,
+        sessionKey: deliveryTarget.sessionKey,
+        sessionId: deliveryTarget.sessionId,
         reason: "approval-over-capacity",
         text: "Approval auto-wait capacity reached. Try again after existing waits complete.",
       });
@@ -191,19 +304,23 @@ export class ApprovalHandoffManager {
       return;
     }
 
-    this.notifier.post({
-      sessionKey: ctx.sessionKey,
-      sessionId: ctx.sessionId,
-      reason: "approval-required",
-      contextKey: `approval:${workerKey}`,
-      text: approvalRequiredMessage(signal, this.config.maxWaitMs),
-    });
+    if (!ctx.skipInitialRequiredNotification) {
+      this.notifier.post({
+        sessionKey: deliveryTarget.sessionKey,
+        sessionId: deliveryTarget.sessionId,
+        reason: "approval-required",
+        contextKey: `approval:${workerKey}`,
+        text: approvalRequiredMessage(signal, this.config.maxWaitMs),
+      });
+    }
 
     const state: WorkerState = {
       key: workerKey,
       signal,
-      sessionId: ctx.sessionId,
-      sessionKey: ctx.sessionKey,
+      executionSessionId: executionTarget.sessionId,
+      executionSessionKey: executionTarget.sessionKey,
+      deliverySessionId: deliveryTarget.sessionId,
+      deliverySessionKey: deliveryTarget.sessionKey,
       controller: new AbortController(),
       terminalSent: false,
     };
@@ -253,7 +370,10 @@ export class ApprovalHandoffManager {
 
     for (const state of Array.from(this.workers.values())) {
       const isSessionMatch =
-        (sessionId && state.sessionId === sessionId) || (sessionKey && state.sessionKey === sessionKey);
+        (sessionId &&
+          (state.executionSessionId === sessionId || state.deliverySessionId === sessionId)) ||
+        (sessionKey &&
+          (state.executionSessionKey === sessionKey || state.deliverySessionKey === sessionKey));
       if (!isSessionMatch) {
         continue;
       }
@@ -263,7 +383,10 @@ export class ApprovalHandoffManager {
         logger: this.logger,
         level: "info",
         event: "cleanup",
-        correlation: this.correlation(state.signal, sessionId ?? sessionKey),
+        correlation: this.correlation(
+          state.signal,
+          state.executionSessionId ?? state.executionSessionKey ?? sessionId ?? sessionKey,
+        ),
         extra: {
           reason,
         },
@@ -272,7 +395,10 @@ export class ApprovalHandoffManager {
   }
 
   private async runWaitWorker(state: WorkerState) {
-    const correlation = this.correlation(state.signal, state.sessionId ?? state.sessionKey);
+    const correlation = this.correlation(
+      state.signal,
+      state.executionSessionId ?? state.executionSessionKey,
+    );
 
     logStructured({
       logger: this.logger,
@@ -290,7 +416,7 @@ export class ApprovalHandoffManager {
       const waitResult = await retryWithBackoff({
         run: async () =>
           await this.waitInvoker({
-            sessionKey: state.sessionKey,
+            sessionKey: state.executionSessionKey,
             handle: state.signal.handle,
             pollIntervalMs: this.config.pollIntervalMs,
             maxWaitMs: this.config.maxWaitMs,
@@ -400,7 +526,10 @@ export class ApprovalHandoffManager {
 
   private async handleTerminalSuccess(state: WorkerState, wait: WaitSuccess) {
     const decision = (wait.decisionOutcome ?? "").toUpperCase();
-    const correlation = this.correlation(state.signal, state.sessionId ?? state.sessionKey);
+    const correlation = this.correlation(
+      state.signal,
+      state.executionSessionId ?? state.executionSessionKey,
+    );
 
     if (decision === "ALLOW") {
       this.emitTerminalMessage(state, {
@@ -420,7 +549,7 @@ export class ApprovalHandoffManager {
           resume_attempted: true,
         },
       });
-      await this.triggerAutoResume(state);
+      await this.triggerAutoResume(state, wait);
       return;
     }
 
@@ -465,7 +594,10 @@ export class ApprovalHandoffManager {
   }
 
   private async handleTerminalError(state: WorkerState, error: unknown) {
-    const correlation = this.correlation(state.signal, state.sessionId ?? state.sessionKey);
+    const correlation = this.correlation(
+      state.signal,
+      state.executionSessionId ?? state.executionSessionKey,
+    );
     const waitError =
       error && typeof error === "object" && (error as { name?: string }).name === "WaitCallError"
         ? (error as WaitCallError)
@@ -537,20 +669,89 @@ export class ApprovalHandoffManager {
     }
     state.terminalSent = true;
     this.notifier.post({
-      sessionKey: state.sessionKey,
-      sessionId: state.sessionId,
+      sessionKey: state.deliverySessionKey,
+      sessionId: state.deliverySessionId,
       reason: params.reason,
       contextKey: `approval:${state.key}`,
       text: params.text,
     });
   }
 
-  private async triggerAutoResume(state: WorkerState) {
+  private async triggerAutoResume(state: WorkerState, wait: WaitSuccess) {
+    const correlation = this.correlation(
+      state.signal,
+      state.executionSessionId ?? state.executionSessionKey,
+    );
+    const completionProbeTimeoutMs = Math.max(1000, Math.min(this.config.reconcileTimeoutMs, 3000));
+
+    if (this.completionProbe) {
+      try {
+        const completion = await this.completionProbe({
+          sessionKey: state.executionSessionKey,
+          signal: state.signal,
+          timeoutMs: completionProbeTimeoutMs,
+        });
+        if (
+          completion?.terminal === true &&
+          completion.terminalStatus === "SUCCEEDED" &&
+          (completion.decisionOutcome === "ALLOW" || completion.decisionOutcome === undefined)
+        ) {
+          this.notifier.post({
+            sessionKey: state.deliverySessionKey,
+            sessionId: state.deliverySessionId,
+            reason: "approval-complete",
+            contextKey: `approval:${state.key}:complete`,
+            text: approvalCompletedMessage(state.signal, completion),
+          });
+          logStructured({
+            logger: this.logger,
+            level: "info",
+            event: "completion_probe_succeeded",
+            correlation,
+            extra: {
+              terminal_status: completion.terminalStatus,
+              decision_outcome: completion.decisionOutcome,
+              run_id: completion.runId,
+              job_id: completion.jobId,
+              executed_steps: completion.executedSteps,
+              last_step: completion.lastStep,
+              resume_attempted: false,
+              wait_terminal_status: wait.terminalStatus,
+            },
+          });
+          return;
+        }
+        logStructured({
+          logger: this.logger,
+          level: "debug",
+          event: "completion_probe_inconclusive",
+          correlation,
+          extra: {
+            terminal: completion?.terminal,
+            terminal_status: completion?.terminalStatus,
+            decision_outcome: completion?.decisionOutcome,
+            resume_attempted: true,
+            wait_terminal_status: wait.terminalStatus,
+          },
+        });
+      } catch (error) {
+        logStructured({
+          logger: this.logger,
+          level: "debug",
+          event: "completion_probe_failed",
+          correlation,
+          extra: {
+            error: String(error),
+            resume_attempted: true,
+            wait_terminal_status: wait.terminalStatus,
+          },
+        });
+      }
+    }
+
     if (!this.resumeInvoker) {
       return;
     }
-
-    const correlation = this.correlation(state.signal, state.sessionId ?? state.sessionKey);
     logStructured({
       logger: this.logger,
       level: "info",
@@ -563,7 +764,7 @@ export class ApprovalHandoffManager {
 
     try {
       await this.resumeInvoker({
-        sessionKey: state.sessionKey,
+        sessionKey: state.executionSessionKey,
         signal: state.signal,
       });
       logStructured({
@@ -578,8 +779,8 @@ export class ApprovalHandoffManager {
     } catch (error) {
       const reason = String(error);
       this.notifier.post({
-        sessionKey: state.sessionKey,
-        sessionId: state.sessionId,
+        sessionKey: state.deliverySessionKey,
+        sessionId: state.deliverySessionId,
         reason: "approval-resume-failed",
         contextKey: `approval:${state.key}:resume`,
         text: approvalResumeFailedMessage(state.signal, reason),

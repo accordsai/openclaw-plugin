@@ -52,4 +52,34 @@ describe("buildVaultRouteContext", () => {
     expect(context.sessionCandidates).toContain("agent:main:telegram:primary:direct:509928323");
     expect(context.sessionCandidates).not.toContain("agent:main:telegram:primary:direct:BOT_00001");
   });
+
+  it("maps local main/tui channel commands to the main agent session", () => {
+    const context = buildVaultRouteContext(baseCtx({
+      channel: "main",
+      senderId: "sam",
+      from: "main",
+      to: "main",
+    }));
+
+    expect(context.sessionCandidates[0]).toBe("agent:main:main");
+  });
+
+  it("maps local tui channel commands to the main agent session even without peer metadata", () => {
+    const context = buildVaultRouteContext(baseCtx({
+      channel: "tui",
+    }));
+
+    expect(context.sessionCandidates[0]).toBe("agent:main:main");
+  });
+
+  it("falls back to sender-derived peer when from/to are not channel addresses", () => {
+    const context = buildVaultRouteContext(baseCtx({
+      channel: "webchat",
+      senderId: "gateway-client",
+      from: "gateway-client",
+      to: "gateway-client",
+    }));
+
+    expect(context.sessionCandidates).toContain("agent:main:webchat:direct:gateway-client");
+  });
 });

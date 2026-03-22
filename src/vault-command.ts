@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ApprovalHandoffManager } from "./approval-manager.js";
+import { parseApprovalRequiredResult } from "./approval-payload.js";
+import { approvalRequiredMessage } from "./messages.js";
+import { parseChannelTargetFromSessionKey } from "./notifier.js";
 import type { ApprovalNotifier, PluginConfig, VaultCommandMode } from "./types.js";
 import type { VaultPluginCommandContext, VaultPluginCommandHandler } from "./vault-command-types.js";
 import { executeResolvedVaultRoute } from "./vault-executor.js";
@@ -110,6 +113,100 @@ export function normalizeVaultRequestForResolver(requestText: string): string {
 
 function chooseSessionKey(candidates: string[]): string | undefined {
   return candidates.find((candidate) => candidate.trim().length > 0);
+}
+
+function isChannelRoutableSessionKey(sessionKey: string | undefined): boolean {
+  const normalized = sessionKey?.trim();
+  if (!normalized) {
+    return false;
+  }
+  return Boolean(parseChannelTargetFromSessionKey(normalized));
+}
+
+function isMainFreshSessionKey(sessionKey: string | undefined): boolean {
+  const normalized = sessionKey?.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /^agent:[^:]+:main-fresh-[^:]+$/.test(normalized);
+}
+
+function isWebchatSessionKey(sessionKey: string | undefined): boolean {
+  const normalized = sessionKey?.trim();
+  if (!normalized) {
+    return false;
+  }
+  const channelTarget = parseChannelTargetFromSessionKey(normalized);
+  return channelTarget?.channel === "webchat";
+}
+
+function chooseDeliveryTarget(params: {
+  runtimeSession: {
+    sessionKey?: string;
+    sessionId?: string;
+  };
+  routeSessionKey?: string;
+  executionSessionKey?: string;
+  executionSessionId?: string;
+}): {
+  sessionKey?: string;
+  sessionId?: string;
+  reason: string;
+} {
+  if (
+    isMainFreshSessionKey(params.executionSessionKey) &&
+    isWebchatSessionKey(params.routeSessionKey)
+  ) {
+    const sessionKey = params.executionSessionKey?.trim();
+    return {
+      sessionKey,
+      sessionId: params.executionSessionId ?? sessionKey,
+      reason: "execution_main_fresh_webchat_local",
+    };
+  }
+
+  if (isChannelRoutableSessionKey(params.runtimeSession.sessionKey)) {
+    const sessionKey = params.runtimeSession.sessionKey?.trim();
+    return {
+      sessionKey,
+      sessionId: params.runtimeSession.sessionId ?? sessionKey,
+      reason: "runtime_session_key_channel_routable",
+    };
+  }
+
+  const routeSessionKey = params.routeSessionKey?.trim();
+  if (routeSessionKey) {
+    return {
+      sessionKey: routeSessionKey,
+      sessionId: params.runtimeSession.sessionId ?? routeSessionKey,
+      reason: "route_session_candidate",
+    };
+  }
+
+  return {
+    sessionKey: params.executionSessionKey,
+    sessionId: params.executionSessionId ?? params.executionSessionKey,
+    reason: "execution_session_fallback",
+  };
+}
+
+function readRuntimeSessionContext(ctx: VaultPluginCommandContext): {
+  sessionKey?: string;
+  sessionId?: string;
+} {
+  const record = ctx as unknown as Record<string, unknown>;
+  const sessionKey =
+    typeof record.sessionKey === "string" && record.sessionKey.trim().length > 0
+      ? record.sessionKey.trim()
+      : undefined;
+  const sessionId =
+    typeof record.sessionId === "string" && record.sessionId.trim().length > 0
+      ? record.sessionId.trim()
+      : undefined;
+  return {
+    sessionKey,
+    sessionId,
+  };
 }
 
 function parsePeerFromAddress(value: string | undefined, channel: string): string | undefined {
@@ -244,6 +341,17 @@ function describeAutoFillFetch(tasks: VaultAutoFillTaskHint[]): string | undefin
   return "I am gathering the requested details now.";
 }
 
+function approvalResponseMessage(
+  envelope: Record<string, unknown>,
+  maxWaitMs: number,
+): string {
+  const parsed = parseApprovalRequiredResult(envelope);
+  if (parsed.type !== "approval") {
+    return approvalQueuedMessage();
+  }
+  return approvalRequiredMessage(parsed.signal, maxWaitMs);
+}
+
 export function createVaultCommandHandler(params: {
   api: OpenClawPluginApi;
   manager: ApprovalHandoffManager;
@@ -269,7 +377,19 @@ export function createVaultCommandHandler(params: {
     const startedAt = Date.now();
     const parsed = parseVaultCommandArgs(ctx.args);
     const routeContext = buildVaultRouteContext(ctx);
-    const sessionKey = chooseSessionKey(routeContext.sessionCandidates);
+    const runtimeSession = readRuntimeSessionContext(ctx);
+    const routeSessionKey = chooseSessionKey(routeContext.sessionCandidates);
+    const executionSessionKey =
+      runtimeSession.sessionKey ??
+      routeSessionKey ??
+      (runtimeSession.sessionId?.startsWith("agent:") ? runtimeSession.sessionId : undefined);
+    const executionSessionId = runtimeSession.sessionId ?? executionSessionKey ?? routeContext.key;
+    const deliveryTarget = chooseDeliveryTarget({
+      runtimeSession,
+      routeSessionKey,
+      executionSessionKey,
+      executionSessionId,
+    });
 
     logVaultMetric({
       logger: params.api.logger,
@@ -277,7 +397,8 @@ export function createVaultCommandHandler(params: {
       routeKey: routeContext.key,
       extra: {
         channel: ctx.channel,
-        has_session_key: Boolean(sessionKey),
+        has_session_key: Boolean(executionSessionKey),
+        has_delivery_session_key: Boolean(deliveryTarget.sessionKey),
         command_kind: parsed.kind,
       },
     });
@@ -383,7 +504,7 @@ export function createVaultCommandHandler(params: {
           ctx,
           message: parsed.text,
           timeoutMs: params.config.vaultCommand.coreFallbackTimeoutMs,
-          sessionKey,
+          sessionKey: executionSessionKey,
         });
         logVaultMetric({
           logger: params.api.logger,
@@ -417,7 +538,7 @@ export function createVaultCommandHandler(params: {
         resolverTool: params.config.vaultCommand.resolverTool,
         requestText: resolverRequestText,
         resolverTimeoutMs: params.config.vaultCommand.resolverTimeoutMs,
-        sessionKey,
+        sessionKey: executionSessionKey,
         enrichmentGlobalTimeoutMs: params.config.vaultCommand.enrichmentGlobalTimeoutMs,
         enrichmentTaskTimeoutMs: params.config.vaultCommand.enrichmentTaskTimeoutMs,
         onAutoFillStart: ({ tasks }) => {
@@ -429,8 +550,8 @@ export function createVaultCommandHandler(params: {
             api: params.api,
             ctx,
             notifier: params.notifier,
-            sessionKey,
-            sessionId: routeContext.key,
+            sessionKey: deliveryTarget.sessionKey,
+            sessionId: deliveryTarget.sessionId,
             runToken,
             routeKey: routeContext.key,
             text: autoFillStartMessage({
@@ -544,7 +665,7 @@ export function createVaultCommandHandler(params: {
       const executed = await executeResolvedVaultRoute({
         config: params.api.config,
         payload,
-        sessionKey,
+        sessionKey: executionSessionKey,
         timeoutMs: params.config.commandTimeoutMs,
       });
 
@@ -569,12 +690,18 @@ export function createVaultCommandHandler(params: {
             result: executed.envelope,
           },
           {
-            sessionKey,
-            sessionId: routeContext.key,
+            sessionKey: executionSessionKey,
+            sessionId: executionSessionId,
+            deliverySessionKey: deliveryTarget.sessionKey,
+            deliverySessionId: deliveryTarget.sessionId,
+            deliveryTargetReason: deliveryTarget.reason,
+            skipInitialRequiredNotification: true,
           },
         );
         return {
-          text: withAutoFillPrefix(approvalQueuedMessage()),
+          text: withAutoFillPrefix(
+            approvalResponseMessage(executed.envelope, params.config.maxWaitMs),
+          ),
         };
       }
 

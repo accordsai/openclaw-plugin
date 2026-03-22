@@ -37,6 +37,7 @@ function approvalRequiredResult() {
 function createHarness(
   waitImpl: Parameters<typeof vi.fn>[0],
   resumeImpl?: Parameters<typeof vi.fn>[0],
+  completionProbeImpl?: Parameters<typeof vi.fn>[0],
 ) {
   const notifications: Array<{ text: string; reason: string; sessionKey?: string; sessionId?: string }> = [];
   const waitInvoker = vi.fn(waitImpl);
@@ -46,10 +47,15 @@ function createHarness(
         // no-op
       }),
   );
+  const completionProbe = vi.fn(
+    completionProbeImpl ??
+      (async () => undefined),
+  );
   const manager = new ApprovalHandoffManager({
     config: { ...DEFAULT_CONFIG },
     waitInvoker,
     resumeInvoker,
+    completionProbe,
     notifier: {
       post: (entry) => {
         notifications.push({
@@ -69,7 +75,7 @@ function createHarness(
     sleep: async () => {},
   });
 
-  return { manager, waitInvoker, resumeInvoker, notifications };
+  return { manager, waitInvoker, resumeInvoker, completionProbe, notifications };
 }
 
 describe("ApprovalHandoffManager integration", () => {
@@ -101,6 +107,32 @@ describe("ApprovalHandoffManager integration", () => {
     expect(notifications[0]?.reason).toBe("approval-required");
   });
 
+  it("can skip initial approval-required notification while still emitting terminal outcome", async () => {
+    const { manager, notifications, resumeInvoker } = createHarness(async () => ({
+      done: true,
+      terminalStatus: "SUCCEEDED",
+      decisionOutcome: "ALLOW",
+      raw: {},
+    }));
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionKey: "agent:main:main",
+        sessionId: "sess-skip-required",
+        skipInitialRequiredNotification: true,
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(notifications.map((entry) => entry.reason)).toEqual(["approval-allow"]);
+    expect(notifications[0]?.text).toContain("Approval allowed");
+    expect(resumeInvoker).toHaveBeenCalledTimes(1);
+  });
+
   it("handles APPROVAL_REQUIRED -> ALLOW", async () => {
     const { manager, notifications, resumeInvoker } = createHarness(async () => ({
       done: true,
@@ -128,6 +160,124 @@ describe("ApprovalHandoffManager integration", () => {
     expect(notifications[0]?.text).toContain("https://alerts.accords.ai/a/req_1?t=abc");
     expect(notifications[1]?.text).toContain("Approval allowed");
     expect(resumeInvoker).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts fast completion callback and skips resume when completion probe confirms success", async () => {
+    const executionSessionKey = "agent:main:main-fresh-1774145368";
+    const deliverySessionKey = "agent:main:main";
+    const { manager, notifications, resumeInvoker, completionProbe } = createHarness(
+      async () => ({
+        done: true,
+        terminalStatus: "SUCCEEDED",
+        decisionOutcome: "ALLOW",
+        raw: {},
+      }),
+      undefined,
+      async () => ({
+        terminal: true,
+        terminalStatus: "SUCCEEDED",
+        decisionOutcome: "ALLOW",
+        runId: "run_fast",
+        jobId: "job_fast",
+        executedSteps: 2,
+        lastStep: "send_draft",
+      }),
+    );
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionKey: executionSessionKey,
+        sessionId: executionSessionKey,
+        deliverySessionKey,
+        deliverySessionId: deliverySessionKey,
+        deliveryTargetReason: "route_session_candidate",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(completionProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: executionSessionKey,
+      }),
+    );
+    expect(completionProbe).toHaveBeenCalledTimes(1);
+    expect(resumeInvoker).toHaveBeenCalledTimes(0);
+    expect(notifications.map((entry) => entry.reason)).toEqual([
+      "approval-required",
+      "approval-allow",
+      "approval-complete",
+    ]);
+    for (const entry of notifications) {
+      expect(entry.sessionKey).toBe(deliverySessionKey);
+      expect(entry.sessionId).toBe(deliverySessionKey);
+    }
+    expect(notifications[2]?.text).toContain("Done");
+    expect(notifications[2]?.text).toContain("executed_steps=2");
+    expect(notifications[2]?.text).toContain("last_step=send_draft");
+  });
+
+  it("falls back to resume when completion probe is inconclusive", async () => {
+    const executionSessionKey = "agent:main:main-fresh-1774145368";
+    const deliverySessionKey = "agent:main:main";
+    const { manager, notifications, waitInvoker, resumeInvoker, completionProbe } = createHarness(
+      async () => ({
+        done: true,
+        terminalStatus: "SUCCEEDED",
+        decisionOutcome: "ALLOW",
+        raw: {},
+      }),
+      undefined,
+      async () => ({
+        terminal: false,
+        terminalStatus: "RUNNING",
+        decisionOutcome: "ALLOW",
+      }),
+    );
+
+    manager.onAfterToolCall(
+      {
+        toolName: "vaultclaw_plan_execute",
+        result: approvalRequiredResult(),
+      },
+      {
+        sessionKey: executionSessionKey,
+        sessionId: executionSessionKey,
+        deliverySessionKey,
+        deliverySessionId: deliverySessionKey,
+        deliveryTargetReason: "route_session_candidate",
+      },
+    );
+
+    await manager.waitForIdle();
+    expect(waitInvoker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: executionSessionKey,
+      }),
+    );
+    expect(completionProbe).toHaveBeenCalledTimes(1);
+    expect(completionProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: executionSessionKey,
+      }),
+    );
+    expect(resumeInvoker).toHaveBeenCalledTimes(1);
+    expect(resumeInvoker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: executionSessionKey,
+      }),
+    );
+    expect(notifications.map((entry) => entry.reason)).toEqual([
+      "approval-required",
+      "approval-allow",
+    ]);
+    for (const entry of notifications) {
+      expect(entry.sessionKey).toBe(deliverySessionKey);
+      expect(entry.sessionId).toBe(deliverySessionKey);
+    }
   });
 
   it("emits explicit handoff for direct/TUI session with only sessionId", async () => {
