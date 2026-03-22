@@ -69,6 +69,16 @@ export type WaitSuccess = {
   raw: unknown;
 };
 
+export type CompletionProbeResult = {
+  terminal: boolean;
+  terminalStatus?: string;
+  decisionOutcome?: string;
+  runId?: string;
+  jobId?: string;
+  executedSteps?: number;
+  lastStep?: string;
+};
+
 export class WaitCallError extends Error {
   readonly code?: string;
   readonly retryable: boolean;
@@ -113,6 +123,12 @@ export type ResumeInvoker = (params: {
   sessionKey?: string;
   signal: ApprovalSignal;
 }) => Promise<void>;
+
+export type CompletionProbe = (params: {
+  sessionKey?: string;
+  signal: ApprovalSignal;
+  timeoutMs: number;
+}) => Promise<CompletionProbeResult | undefined>;
 
 export type ApprovalNotifier = {
   post: (params: {

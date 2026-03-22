@@ -5,6 +5,8 @@ export type VaultRouteContext = {
   sessionCandidates: string[];
 };
 
+const LOCAL_SURFACES = new Set(["main", "tui", "cli", "terminal", "console"]);
+
 function compact(value: string | undefined): string {
   if (!value) {
     return "-";
@@ -57,6 +59,9 @@ function buildChannelSessionKey(params: {
   peerId: string;
 }): string {
   const channel = params.channel.trim().toLowerCase();
+  if (LOCAL_SURFACES.has(channel)) {
+    return "agent:main:main";
+  }
   const account = params.accountId?.trim();
   if (account) {
     return `agent:main:${channel}:${account}:direct:${params.peerId}`;
@@ -65,9 +70,14 @@ function buildChannelSessionKey(params: {
 }
 
 export function buildVaultRouteContext(ctx: VaultPluginCommandContext): VaultRouteContext {
-  const channel = compact(ctx.channel.toLowerCase());
+  const normalizedChannel = ctx.channel.trim().toLowerCase();
+  const channel = compact(normalizedChannel);
   const account = compact(ctx.accountId);
-  const sender = compact(ctx.senderId ?? parsePeerFromAddress(ctx.from, ctx.channel) ?? parsePeerFromAddress(ctx.to, ctx.channel));
+  const sender = compact(
+    ctx.senderId ??
+      parsePeerFromAddress(ctx.from, ctx.channel) ??
+      parsePeerFromAddress(ctx.to, ctx.channel),
+  );
   const thread = typeof ctx.messageThreadId === "number" ? String(ctx.messageThreadId) : "-";
 
   const key = `vault:${channel}:${account}:${sender}:${thread}`;
@@ -87,12 +97,16 @@ export function buildVaultRouteContext(ctx: VaultPluginCommandContext): VaultRou
     fromPeer ??
     toPeer;
 
-  const channelCandidates = peer
+  const senderFallbackPeer = sender !== "-" ? sender : undefined;
+  const candidatePeer = peer ?? senderFallbackPeer;
+  const localSurfaceCandidate = LOCAL_SURFACES.has(normalizedChannel) ? "agent:main:main" : undefined;
+  const channelCandidates = candidatePeer
     ? unique([
-      buildChannelSessionKey({ channel: ctx.channel, accountId: ctx.accountId, peerId: peer }),
-      buildChannelSessionKey({ channel: ctx.channel, peerId: peer }),
+      localSurfaceCandidate,
+      buildChannelSessionKey({ channel: ctx.channel, accountId: ctx.accountId, peerId: candidatePeer }),
+      buildChannelSessionKey({ channel: ctx.channel, peerId: candidatePeer }),
     ])
-    : [];
+    : unique([localSurfaceCandidate]);
 
   const sessionCandidates = unique([...channelCandidates, ...rawAgentCandidates]);
   return { key, sessionCandidates };

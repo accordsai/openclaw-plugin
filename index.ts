@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ApprovalHandoffManager } from "./src/approval-manager.js";
+import { createGatewayCompletionProbe } from "./src/completion-probe.js";
 import { normalizePluginConfig } from "./src/config.js";
 import { createApprovalNotifier } from "./src/notifier.js";
 import { createGatewayAgentResumeInvoker } from "./src/resume-invoker.js";
@@ -82,6 +83,7 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     const config = normalizePluginConfig(api.pluginConfig);
     const waitInvoker = createGatewayToolsInvokeWaitInvoker(api.config);
+    const completionProbe = createGatewayCompletionProbe(api.config);
     const resumeInvoker = typeof api.runtime?.system?.runCommandWithTimeout === "function"
       ? createGatewayAgentResumeInvoker({
         runCommandWithTimeout: api.runtime.system.runCommandWithTimeout,
@@ -93,6 +95,7 @@ const plugin = {
       config,
       waitInvoker,
       resumeInvoker,
+      completionProbe,
       logger: api.logger,
       notifier,
     });

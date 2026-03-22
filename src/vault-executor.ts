@@ -124,6 +124,13 @@ function toErrorFromEnvelope(envelope: Record<string, unknown>): ErrorOutcome {
       message: "internal parser mismatch: approval should have been handled separately",
     };
   }
+  if (parsed.type === "invalid") {
+    return {
+      kind: "error",
+      code: "MCP_APPROVAL_REQUIRED",
+      message: `approval response was malformed: ${parsed.message}`,
+    };
+  }
   const error = extractToolError(envelope);
   return {
     kind: "error",
@@ -176,7 +183,7 @@ function maybeApprovalResult(toolName: string, envelope: Record<string, unknown>
     return undefined;
   }
   const parsed = parseApprovalRequiredResult(envelope);
-  if (parsed.type === "approval" || parsed.type === "invalid") {
+  if (parsed.type === "approval") {
     return {
       kind: "approval_required",
       toolName,

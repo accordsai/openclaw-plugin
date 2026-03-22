@@ -65,6 +65,35 @@ function buildContext(args: string) {
   } as any;
 }
 
+function buildMainContext(args: string) {
+  return {
+    channel: "main",
+    channelId: "main",
+    isAuthorizedSender: true,
+    commandBody: `/vault ${args}`,
+    args,
+    config: {},
+    senderId: "main",
+    from: "main",
+    to: "main",
+  } as any;
+}
+
+function buildWebchatContext(args: string, overrides: Record<string, unknown> = {}) {
+  return {
+    channel: "webchat",
+    channelId: "webchat",
+    isAuthorizedSender: true,
+    commandBody: `/vault ${args}`,
+    args,
+    config: {},
+    senderId: "gateway-client",
+    from: "gateway-client",
+    to: "gateway-client",
+    ...overrides,
+  } as any;
+}
+
 describe("createVaultCommandHandler missing-input routing", () => {
   const resolveMock = vi.mocked(resolveAndEnrichVaultRoute);
   const fallbackMock = vi.mocked(runCoreFallback);
@@ -177,6 +206,499 @@ describe("createVaultCommandHandler missing-input routing", () => {
       manager.onAfterToolCall.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
     expect(fallbackMock).not.toHaveBeenCalled();
+  });
+
+  it("routes approval waits to the main session when /vault runs in local main channel", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-main-session-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Test body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: { ok: true },
+    } as any);
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const result = await handler(buildMainContext("send an email to skl83@cornell.edu"));
+    expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: "agent:main:main",
+      sessionId: "agent:main:main",
+      deliverySessionKey: "agent:main:main",
+      deliverySessionId: "agent:main:main",
+      deliveryTargetReason: "route_session_candidate",
+      skipInitialRequiredNotification: true,
+    });
+  });
+
+  it("returns attestation details in immediate approval response when available", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-attestation-response-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Wine",
+          text_plain: "Bouzeron notes",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: {
+        ok: false,
+        error: {
+          code: "MCP_APPROVAL_REQUIRED",
+          details: {
+            approval: {
+              challenge_id: "ach_42",
+              pending_id: "apj_42",
+              run_id: "run_42",
+              job_id: "job_42",
+              remote_attestation_url: "https://alerts.accords.ai/a/test/ach_42/token",
+              next_action: {
+                tool: "vaultclaw_approval_wait",
+                arguments: {
+                  handle: {
+                    kind: "PLAN_RUN",
+                    challenge_id: "ach_42",
+                    pending_id: "apj_42",
+                    run_id: "run_42",
+                    job_id: "job_42",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    } as any);
+
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const result = await handler(buildMainContext("send an email to skl83@cornell.edu"));
+    expect(result.text).toBe(
+      "Approval required in Vaultclaw UI. Waiting up to 10 minutes... (challenge_id=ach_42, pending_id=apj_42, run_id=run_42, job_id=job_42)\nAttestation link: [https://alerts.accords.ai/a/test/ach_42/token](https://alerts.accords.ai/a/test/ach_42/token)",
+    );
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: "agent:main:main",
+      sessionId: "agent:main:main",
+      deliverySessionKey: "agent:main:main",
+      deliverySessionId: "agent:main:main",
+      deliveryTargetReason: "route_session_candidate",
+      skipInitialRequiredNotification: true,
+    });
+  });
+
+  it("uses runtime sessionId for approval follow-up delivery when present", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-webchat-sessionid-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: { ok: true },
+    } as any);
+
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const result = await handler(
+      buildWebchatContext("send an email to skl83@cornell.edu", {
+        sessionId: "sess-webchat-123",
+      }),
+    );
+    expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe("agent:main:webchat:direct:gateway-client");
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: "agent:main:webchat:direct:gateway-client",
+      sessionId: "sess-webchat-123",
+      deliverySessionKey: "agent:main:webchat:direct:gateway-client",
+      deliverySessionId: "sess-webchat-123",
+      deliveryTargetReason: "route_session_candidate",
+      skipInitialRequiredNotification: true,
+    });
+  });
+
+  it("uses runtime sessionKey when available for webchat command execution and follow-up", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-webchat-sessionkey-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: { ok: true },
+    } as any);
+
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const runtimeSessionKey = "agent:main:webchat:default:direct:gateway-client";
+    const result = await handler(
+      buildWebchatContext("send an email to skl83@cornell.edu", {
+        sessionKey: runtimeSessionKey,
+        sessionId: "sess-webchat-abc",
+      }),
+    );
+    expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe(runtimeSessionKey);
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: runtimeSessionKey,
+      sessionId: "sess-webchat-abc",
+      deliverySessionKey: runtimeSessionKey,
+      deliverySessionId: "sess-webchat-abc",
+      deliveryTargetReason: "runtime_session_key_channel_routable",
+      skipInitialRequiredNotification: true,
+    });
+  });
+
+  it("uses main-fresh execution session for webchat local follow-up delivery", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-webchat-mainfresh-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: { ok: true },
+    } as any);
+
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const runtimeSessionKey = "agent:main:main-fresh-1774139507";
+    const result = await handler(
+      buildWebchatContext("send an email to skl83@cornell.edu", {
+        sessionKey: runtimeSessionKey,
+      }),
+    );
+    expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe(runtimeSessionKey);
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: runtimeSessionKey,
+      sessionId: runtimeSessionKey,
+      deliverySessionKey: runtimeSessionKey,
+      deliverySessionId: runtimeSessionKey,
+      deliveryTargetReason: "execution_main_fresh_webchat_local",
+      skipInitialRequiredNotification: true,
+    });
+  });
+
+  it("keeps main-fresh as execution target but routes local main follow-up delivery to agent:main:main", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-main-mainfresh-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_plan_execute",
+      envelope: { ok: true },
+    } as any);
+
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const runtimeSessionKey = "agent:main:main-fresh-1774140091";
+    const result = await handler({
+      ...buildMainContext("send an email to skl83@cornell.edu"),
+      sessionKey: runtimeSessionKey,
+    });
+
+    expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe(runtimeSessionKey);
+    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
+      sessionKey: runtimeSessionKey,
+      sessionId: runtimeSessionKey,
+      deliverySessionKey: "agent:main:main",
+      deliverySessionId: "agent:main:main",
+      deliveryTargetReason: "route_session_candidate",
+      skipInitialRequiredNotification: true,
+    });
   });
 
   it("Case B: enrichment failure path emits interim progress then falls back in HYBRID mode", async () => {

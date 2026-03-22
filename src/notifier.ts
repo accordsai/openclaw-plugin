@@ -40,12 +40,25 @@ export function createApprovalNotifier(api: Pick<OpenClawPluginApi, "runtime" | 
 
       const target = parseChannelTargetFromSessionKey(scopedSessionKey);
       if (!target) {
+        if (isMainFreshAgentSessionKey(scopedSessionKey)) {
+          const handled = tryChatInject({
+            api,
+            sessionKey: scopedSessionKey,
+            text,
+            fallback,
+            targetLabel: "main-fresh",
+          });
+          if (handled) {
+            return;
+          }
+        }
         fallback();
         return;
       }
       const handled = tryDirectChannelSend({
         api,
         target,
+        sessionKey: scopedSessionKey,
         text,
         fallback,
       });
@@ -59,10 +72,11 @@ export function createApprovalNotifier(api: Pick<OpenClawPluginApi, "runtime" | 
 function tryDirectChannelSend(params: {
   api: Pick<OpenClawPluginApi, "runtime" | "logger">;
   target: ChannelTarget;
+  sessionKey: string;
   text: string;
   fallback: () => void;
 }): boolean {
-  const { api, target, text, fallback } = params;
+  const { api, target, sessionKey, text, fallback } = params;
   const warnAndFallback = (phase: "failed" | "threw", error: unknown) => {
     api.logger.warn(
       `[vaultclaw-approval-handoff] direct ${target.channel} send ${phase}, falling back to system event: ${String(error)}`,
@@ -136,7 +150,21 @@ function tryDirectChannelSend(params: {
     }
   }
 
+  if (target.channel === "webchat") {
+    return tryChatInject({
+      api,
+      sessionKey,
+      text,
+      fallback,
+      targetLabel: "webchat",
+    });
+  }
+
   return false;
+}
+
+function isMainFreshAgentSessionKey(sessionKey: string): boolean {
+  return /^agent:[^:]+:main-fresh-[^:]+$/i.test(sessionKey.trim());
 }
 
 function createFallbackNotifier(params: {
@@ -190,6 +218,111 @@ function createFallbackNotifier(params: {
       `[vaultclaw-approval-handoff] failed to enqueue system event for all session candidates`,
     );
   };
+}
+
+function readString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Continue scanning lines.
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line || !line.startsWith("{")) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // ignore and continue scanning
+    }
+  }
+  return undefined;
+}
+
+function tryChatInject(params: {
+  api: Pick<OpenClawPluginApi, "runtime" | "logger">;
+  sessionKey: string;
+  text: string;
+  fallback: () => void;
+  targetLabel: string;
+}): boolean {
+  const run = params.api.runtime?.system?.runCommandWithTimeout;
+  if (typeof run !== "function") {
+    return false;
+  }
+
+  const payload = JSON.stringify({
+    sessionKey: params.sessionKey,
+    message: params.text,
+    label: "Vault",
+  });
+
+  try {
+    void run(
+      [
+        "openclaw",
+        "gateway",
+        "call",
+        "chat.inject",
+        "--json",
+        "--timeout",
+        "10000",
+        "--params",
+        payload,
+      ],
+      {
+        timeoutMs: 12000,
+        maxBuffer: 512 * 1024,
+      },
+    ).then((result) => {
+      if (result.code !== 0) {
+        throw new Error(
+          `chat.inject failed (code=${String(result.code)}): ${readString(result.stderr) ?? readString(result.stdout) ?? "unknown error"}`,
+        );
+      }
+      const parsed = parseJsonObject(result.stdout);
+      if (parsed?.ok === false) {
+        const errorObj =
+          parsed.error && typeof parsed.error === "object" && !Array.isArray(parsed.error)
+            ? (parsed.error as Record<string, unknown>)
+            : undefined;
+        throw new Error(readString(errorObj?.message) ?? "chat.inject returned ok=false");
+      }
+    }).catch((error: unknown) => {
+      params.api.logger.warn(
+        `[vaultclaw-approval-handoff] ${params.targetLabel} chat.inject failed, falling back to system event: ${String(error)}`,
+      );
+      params.fallback();
+    });
+    return true;
+  } catch (error) {
+    params.api.logger.warn(
+      `[vaultclaw-approval-handoff] ${params.targetLabel} chat.inject threw, falling back to system event: ${String(error)}`,
+    );
+    params.fallback();
+    return true;
+  }
 }
 
 export function parseChannelTargetFromSessionKey(sessionKey: string): ChannelTarget | undefined {

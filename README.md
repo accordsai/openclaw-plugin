@@ -11,8 +11,9 @@ When a tool returns `MCP_APPROVAL_REQUIRED`, the plugin:
 - notifies the user to approve/deny in Vaultclaw UI
 - asynchronously invokes `vaultclaw_approval_wait`
 - posts a single terminal update for `ALLOW`, `DENY`, or timeout
-- on `ALLOW`, auto-triggers one follow-up `agent` run for the same `sessionKey` so
-  compound flows continue without a manual "approved" message
+- on `ALLOW`, first runs a fast `vaultclaw_job_get` completion probe and posts an immediate
+  final success callback when the job is already terminal; if inconclusive, falls back to one
+  follow-up `agent` run for the same `sessionKey`
 
 No second manual CLI command is required.
 
@@ -36,6 +37,8 @@ openclaw plugins install @vaultclaw/vaultclaw-mcp-approval-handoff
 ```bash
 ./scripts/install.sh
 ```
+
+This installer also applies OpenClaw core hotfixes (Telegram slash-command reload + plugin command session context passthrough for async follow-ups) and restarts the gateway automatically.
 
 Optional npm/package override:
 
@@ -135,6 +138,7 @@ Resolver requirement:
 - No-retry terminal categories: validation/auth/timeouts.
 - Reconciliation: when wait payloads are malformed or terminal status is unknown, plugin attempts read-only reconciliation through `vaultclaw_approvals_pending_get` and `vaultclaw_job_get`.
 - Reconciliation on wait failure: transient wait transport failures can trigger a read-only reconciliation check before surfacing terminal error guidance.
+- ALLOW completion callback: after ALLOW, plugin probes `vaultclaw_job_get` with a short timeout to post deterministic completion updates without waiting for an extra model turn.
 - Legacy mcporter fallback remains opt-in (`allowMcporterFallback=true`) but is deprecated; standard behavior uses Gateway `/tools/invoke` only.
 - Unknown terminal outcomes are surfaced explicitly (not as timeout) with retry guidance.
 - If `ALLOW` is confirmed but auto-resume fails, plugin posts a manual fallback instruction (`reply approved` or rerun request).
@@ -157,6 +161,9 @@ Structured plugin logs include:
 - `wait_canceled`
 - `wait_retry`
 - `terminal_outcome`
+- `completion_probe_succeeded`
+- `completion_probe_inconclusive`
+- `completion_probe_failed`
 - `resume_started`
 - `resume_completed`
 - `resume_failed`
