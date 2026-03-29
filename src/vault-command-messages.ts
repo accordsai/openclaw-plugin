@@ -22,6 +22,7 @@ export function vaultUsageMessage(params: {
     "- /vault on [hybrid|strict]",
     "- /vault off",
     "- /vault status",
+    "- /vault update token <ses_...>",
     "- /vault <natural language request>",
   ].join("\n");
 }

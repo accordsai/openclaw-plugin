@@ -8,6 +8,15 @@ describe("parseVaultCommandArgs", () => {
     expect(parseVaultCommandArgs("on")).toEqual({ kind: "on" });
     expect(parseVaultCommandArgs("on hybrid")).toEqual({ kind: "on", mode: "hybrid" });
     expect(parseVaultCommandArgs("on strict")).toEqual({ kind: "on", mode: "strict" });
+    expect(parseVaultCommandArgs("update token ses_abc123")).toEqual({
+      kind: "update_token",
+      token: "ses_abc123",
+    });
+    expect(parseVaultCommandArgs("update token \"ses_quoted123\"")).toEqual({
+      kind: "update_token",
+      token: "ses_quoted123",
+    });
+    expect(parseVaultCommandArgs("update token")).toEqual({ kind: "update_token_usage" });
   });
 
   it("treats free text as NL request", () => {

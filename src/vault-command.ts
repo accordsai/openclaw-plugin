@@ -35,7 +35,11 @@ type ParsedVaultCommand =
   | { kind: "status" }
   | { kind: "on"; mode?: VaultCommandMode }
   | { kind: "off" }
+  | { kind: "update_token"; token: string }
+  | { kind: "update_token_usage" }
   | { kind: "request"; text: string };
+
+const VAULT_AGENT_TOKEN_PATTERN = /^ses_[A-Za-z0-9]+$/;
 
 function parseVaultCommandArgs(rawArgs: string | undefined): ParsedVaultCommand {
   const args = (rawArgs ?? "").trim();
@@ -59,11 +63,97 @@ function parseVaultCommandArgs(rawArgs: string | undefined): ParsedVaultCommand 
   if (normalized === "on strict") {
     return { kind: "on", mode: "strict" };
   }
+  if (normalized === "update token") {
+    return { kind: "update_token_usage" };
+  }
+
+  const updateToken = args.match(/^update\s+token\s+(.+)$/i);
+  if (updateToken?.[1]) {
+    const token = stripWrappingQuotes(updateToken[1]);
+    if (token.length === 0) {
+      return { kind: "update_token_usage" };
+    }
+    return {
+      kind: "update_token",
+      token,
+    };
+  }
 
   return {
     kind: "request",
     text: args,
   };
+}
+
+function stripWrappingQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if (
+      (first === "\"" && last === "\"") ||
+      (first === "'" && last === "'") ||
+      (first === "`" && last === "`")
+    ) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function ensureRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = asRecord(parent[key]);
+  if (existing) {
+    return existing;
+  }
+  const next: Record<string, unknown> = {};
+  parent[key] = next;
+  return next;
+}
+
+function maskToken(token: string): string {
+  if (token.length <= 10) {
+    return `${token.slice(0, 3)}***`;
+  }
+  return `${token.slice(0, 4)}***${token.slice(-4)}`;
+}
+
+async function persistVaultAgentToken(api: OpenClawPluginApi, token: string): Promise<void> {
+  const runtimeConfig = api.runtime?.config;
+  if (
+    !runtimeConfig ||
+    typeof runtimeConfig.loadConfig !== "function" ||
+    typeof runtimeConfig.writeConfigFile !== "function"
+  ) {
+    throw new Error("runtime config writer is unavailable");
+  }
+
+  const loaded = runtimeConfig.loadConfig() as unknown;
+  const next = (structuredClone(loaded) || {}) as Record<string, unknown>;
+
+  const env = ensureRecord(next, "env");
+  const vars = ensureRecord(env, "vars");
+  env.VC_AGENT_TOKEN = token;
+  vars.VC_AGENT_TOKEN = token;
+
+  const skills = ensureRecord(next, "skills");
+  const entries = ensureRecord(skills, "entries");
+  const vaultclaw = ensureRecord(entries, "vaultclaw");
+  const vaultclawEnv = ensureRecord(vaultclaw, "env");
+  vaultclawEnv.VC_AGENT_TOKEN = token;
+
+  const vaultclawGoogle = ensureRecord(entries, "vaultclaw_google");
+  const vaultclawGoogleEnv = ensureRecord(vaultclawGoogle, "env");
+  vaultclawGoogleEnv.VC_AGENT_TOKEN = token;
+
+  await runtimeConfig.writeConfigFile(next as any);
 }
 
 function cleanFieldValue(value: string): string {
@@ -472,6 +562,42 @@ export function createVaultCommandHandler(params: {
           enabled: nextState.enabled,
           mode: nextState.mode,
         }),
+      };
+    }
+
+    if (parsed.kind === "update_token_usage") {
+      return {
+        text: "Usage: /vault update token <ses_...>",
+      };
+    }
+
+    if (parsed.kind === "update_token") {
+      if (!VAULT_AGENT_TOKEN_PATTERN.test(parsed.token)) {
+        return {
+          text: "Vault token format looks invalid. Expected a token that starts with `ses_`.",
+        };
+      }
+
+      try {
+        await persistVaultAgentToken(params.api, parsed.token);
+      } catch (error) {
+        logVaultMetric({
+          logger: params.api.logger,
+          event: "vault_token_update_failed",
+          routeKey: routeContext.key,
+        });
+        return {
+          text: `Failed to save Vaultclaw token: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+
+      logVaultMetric({
+        logger: params.api.logger,
+        event: "vault_token_updated",
+        routeKey: routeContext.key,
+      });
+      return {
+        text: `Vaultclaw token saved (${maskToken(parsed.token)}). Restart the OpenClaw gateway to apply it immediately.`,
       };
     }
 

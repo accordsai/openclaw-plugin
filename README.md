@@ -114,6 +114,7 @@ When enabled, the plugin registers `/vault`:
 - `/vault on [hybrid|strict]`
 - `/vault off`
 - `/vault status`
+- `/vault update token <ses_...>`
 - `/vault <natural language request>`
 
 Mode semantics:
