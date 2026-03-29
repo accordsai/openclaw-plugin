@@ -1,6 +1,6 @@
 {
   "name": "@vaultclaw/vaultclaw-mcp-approval-handoff",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "OpenClaw plugin that auto-waits Vaultclaw MCP approvals",
   "type": "module",
   "files": [
