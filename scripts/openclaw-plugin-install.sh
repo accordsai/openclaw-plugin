@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
 BRIDGE_PLUGIN_ID="vaultclaw-openclaw-bridge"
 HANDOFF_PLUGIN_ID="vaultclaw-mcp-approval-handoff"
 
@@ -9,6 +11,8 @@ HANDOFF_SPEC="${HANDOFF_SPEC:-@vaultclaw/vaultclaw-mcp-approval-handoff@0.1.10}"
 MCP_BIN="${MCP_BIN:-$HOME/.openclaw/bin/accords-mcp}"
 HANDOFF_EXT_DIR="${HOME}/.openclaw/extensions/${HANDOFF_PLUGIN_ID}"
 HANDOFF_PATCH_SCRIPT="${HANDOFF_PATCH_SCRIPT:-${HANDOFF_EXT_DIR}/scripts/patch-openclaw-core.mjs}"
+VAULTCLAW_SKILL_SOURCE_DIR="${VAULTCLAW_SKILL_SOURCE_DIR:-${SCRIPT_DIR}/../../accords-mcp/skills/vaultclaw}"
+VAULTCLAW_SKILL_DEST_DIR="${VAULTCLAW_SKILL_DEST_DIR:-${HOME}/.openclaw/workspace/skills/vaultclaw}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -32,6 +36,35 @@ remove_stale_extension_dir() {
     echo "Removing stale extension directory: $ext_dir"
     rm -rf "$ext_dir"
   fi
+}
+
+sync_vaultclaw_skill() {
+  src_dir="$VAULTCLAW_SKILL_SOURCE_DIR"
+  dest_dir="$VAULTCLAW_SKILL_DEST_DIR"
+
+  if [ ! -f "$src_dir/SKILL.md" ]; then
+    echo "warning: Vaultclaw skill source not found at: $src_dir"
+    echo "warning: skipping skill sync. Set VAULTCLAW_SKILL_SOURCE_DIR to override."
+    return 0
+  fi
+
+  echo "Syncing Vaultclaw skill from: $src_dir"
+  mkdir -p "$dest_dir"
+
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "$src_dir"/ "$dest_dir"/
+  else
+    (
+      cd "$src_dir"
+      find . -type f | while IFS= read -r rel_path; do
+        rel_path="${rel_path#./}"
+        mkdir -p "$dest_dir/$(dirname "$rel_path")"
+        cp "$src_dir/$rel_path" "$dest_dir/$rel_path"
+      done
+    )
+  fi
+
+  echo "Vaultclaw skill synced to: $dest_dir"
 }
 
 echo "Installing OpenClaw Vaultclaw plugins..."
@@ -61,6 +94,8 @@ openclaw config set "plugins.entries.$HANDOFF_PLUGIN_ID.config.pollIntervalMs" 1
 openclaw config set "plugins.entries.$HANDOFF_PLUGIN_ID.config.maxWaitMs" 600000
 openclaw config set "plugins.entries.$HANDOFF_PLUGIN_ID.config.commandTimeoutMs" 720000
 openclaw config set "plugins.entries.$HANDOFF_PLUGIN_ID.config.maxConcurrentWaits" 10
+
+sync_vaultclaw_skill
 
 if [ ! -f "$HANDOFF_PATCH_SCRIPT" ]; then
   echo "error: expected patch script not found: $HANDOFF_PATCH_SCRIPT" >&2
