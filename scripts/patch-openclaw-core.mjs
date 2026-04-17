@@ -117,6 +117,18 @@ function patchPluginCommandSessionContext(source) {
   return { patched, replacements };
 }
 
+function patchOpenAITextVerbosityDefault(source) {
+  let replacements = 0;
+  const patched = source.replace(
+    /merged\.text_verbosity\s*=\s*"low";/g,
+    () => {
+      replacements += 1;
+      return 'merged.text_verbosity = "medium";';
+    },
+  );
+  return { patched, replacements };
+}
+
 function patchDistRoot(distRoot) {
   const jsFiles = collectJsFiles(distRoot);
   let patchedFiles = 0;
@@ -136,6 +148,12 @@ function patchDistRoot(distRoot) {
       const pluginSessionPatch = patchPluginCommandSessionContext(patched);
       patched = pluginSessionPatch.patched;
       replacements += pluginSessionPatch.replacements;
+    }
+
+    if (raw.includes("applyDefaultOpenAIGptRuntimeParams") && raw.includes('merged.text_verbosity = "low";')) {
+      const textVerbosityPatch = patchOpenAITextVerbosityDefault(patched);
+      patched = textVerbosityPatch.patched;
+      replacements += textVerbosityPatch.replacements;
     }
 
     if (replacements <= 0) continue;

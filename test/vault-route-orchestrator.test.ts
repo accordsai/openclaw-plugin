@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { VaultFactResolutionError } from "../src/vault-fact-resolver.js";
 import type { ResolverPayload } from "../src/vault-resolver-client.js";
 import { resolveAndEnrichVaultRoute } from "../src/vault-route-orchestrator.js";
 
@@ -24,6 +25,11 @@ function missingPayload(params: {
 }
 
 describe("resolveAndEnrichVaultRoute", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("Gmail weather+attachment: retries once with fetched fact and becomes executable", async () => {
     const resolveRoute = vi
       .fn()
@@ -573,5 +579,193 @@ describe("resolveAndEnrichVaultRoute", () => {
     expect(resolveRoute).toHaveBeenCalledTimes(2);
     expect(result.telemetry.autoRetryAttempted).toBe(true);
     expect(result.telemetry.retryStatus).toBe("RESOLVED_MISSING_INPUTS");
+  });
+
+  it("Default resolver uses /v1/responses safe text path (no sessions_send)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [
+                {
+                  type: "output_text",
+                  text: "{\"email_body\":\"Hi from safe text.\"}",
+                },
+              ],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resolveRoute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rawEnvelope: {},
+        payload: {
+          ...missingPayload({
+            missingInputs: ["text_plain"],
+            progressHintMode: "AUTO_ENRICH_AND_RETRY",
+            guidance: [
+              {
+                input_key: "text_plain",
+                resolution_mode: "AUTO_RETRY_WITH_FACTS",
+                external_fact_request: {
+                  fact_key: "email_body",
+                  kind: "email_body_generation",
+                  parallelizable: true,
+                  batch_group: "gmail_compose_enrichment",
+                  request_text: "send email saying hi",
+                },
+              },
+            ],
+          }),
+          domain: "google.gmail",
+        } satisfies ResolverPayload,
+      })
+      .mockImplementationOnce(async (params) => {
+        const facts = (params.context as Record<string, unknown> | undefined)?.facts as
+          | Record<string, unknown>
+          | undefined;
+        expect(facts?.email_body).toBe("Hi from safe text.");
+        return {
+          rawEnvelope: {},
+          payload: {
+            status: "RESOLVED_EXECUTABLE",
+            execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+          } satisfies ResolverPayload,
+        };
+      });
+
+    const result = await resolveAndEnrichVaultRoute({
+      config: {
+        gateway: {
+          bind: "loopback",
+          port: 18789,
+          auth: {
+            mode: "none",
+          },
+        },
+      } as any,
+      resolverTool: "vaultclaw_route_resolve",
+      requestText: "send email saying hi",
+      resolverTimeoutMs: 3000,
+      sessionKey: "agent:main:webchat:direct:user1",
+      enrichmentGlobalTimeoutMs: 5000,
+      enrichmentTaskTimeoutMs: 2000,
+      deterministicDomains: ["google.gmail"],
+      resolveRoute,
+    });
+
+    expect(result.payload?.status).toBe("RESOLVED_EXECUTABLE");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toContain("/v1/responses");
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/tools/invoke"))).toBe(false);
+  });
+
+  it("Domain gate: skips auto-enrichment for non-deterministic domains", async () => {
+    const resolveRoute = vi.fn().mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        ...missingPayload({
+          missingInputs: ["text_plain"],
+          progressHintMode: "AUTO_ENRICH_AND_RETRY",
+          guidance: [
+            {
+              input_key: "text_plain",
+              resolution_mode: "AUTO_RETRY_WITH_FACTS",
+              external_fact_request: {
+                fact_key: "weather_summary",
+                kind: "weather_forecast",
+                parallelizable: true,
+                batch_group: "gmail_compose_enrichment",
+                request_text: "weather in irvine today",
+              },
+            },
+          ],
+        }),
+        domain: "google.gmail",
+      } satisfies ResolverPayload,
+    });
+    const resolveFact = vi.fn();
+
+    const result = await resolveAndEnrichVaultRoute({
+      config: {} as any,
+      resolverTool: "vaultclaw_route_resolve",
+      requestText: "email weather",
+      resolverTimeoutMs: 3000,
+      sessionKey: "main",
+      enrichmentGlobalTimeoutMs: 5000,
+      enrichmentTaskTimeoutMs: 2000,
+      deterministicDomains: ["generic.http"],
+      resolveRoute,
+      resolveFact,
+    });
+
+    expect(result.payload?.status).toBe("RESOLVED_MISSING_INPUTS");
+    expect(resolveRoute).toHaveBeenCalledTimes(1);
+    expect(resolveFact).not.toHaveBeenCalled();
+    expect(result.telemetry.autoRetryAttempted).toBe(false);
+    expect(result.telemetry.fallbackToUserReason).toBe("domain_not_deterministic");
+    expect(result.telemetry.failureReasonCodes).toEqual(["domain_not_deterministic"]);
+  });
+
+  it("Auto-enrich failure without completed facts: returns ask-user state without retry", async () => {
+    const resolveRoute = vi.fn().mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        ...missingPayload({
+          missingInputs: ["text_plain"],
+          progressHintMode: "AUTO_ENRICH_AND_RETRY",
+          guidance: [
+            {
+              input_key: "text_plain",
+              resolution_mode: "AUTO_RETRY_WITH_FACTS",
+              external_fact_request: {
+                fact_key: "email_body",
+                kind: "email_body_generation",
+                parallelizable: true,
+                batch_group: "gmail_compose_enrichment",
+                request_text: "send email",
+              },
+            },
+          ],
+        }),
+        domain: "google.gmail",
+      } satisfies ResolverPayload,
+    });
+    const resolveFact = vi.fn().mockRejectedValue(
+      new VaultFactResolutionError({
+        reasonCode: "safe_text_unavailable",
+        message: "safe text generation endpoint is unavailable",
+      }),
+    );
+
+    const result = await resolveAndEnrichVaultRoute({
+      config: {} as any,
+      resolverTool: "vaultclaw_route_resolve",
+      requestText: "send email",
+      resolverTimeoutMs: 3000,
+      sessionKey: "main",
+      enrichmentGlobalTimeoutMs: 5000,
+      enrichmentTaskTimeoutMs: 2000,
+      deterministicDomains: ["google.gmail"],
+      resolveRoute,
+      resolveFact,
+    });
+
+    expect(result.payload?.status).toBe("RESOLVED_MISSING_INPUTS");
+    expect(resolveRoute).toHaveBeenCalledTimes(1);
+    expect(resolveFact).toHaveBeenCalledTimes(1);
+    expect(result.telemetry.autoRetryAttempted).toBe(true);
+    expect(result.telemetry.factTasksCompleted).toBe(0);
+    expect(result.telemetry.factTasksFailed).toBe(1);
+    expect(result.telemetry.failureReasonCodes).toEqual(["safe_text_unavailable"]);
+    expect(result.telemetry.fallbackToUserReason).toBe("safe_text_unavailable");
   });
 });

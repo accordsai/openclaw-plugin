@@ -109,6 +109,11 @@ export type ToolInvokeResponse = {
   invokeResult?: Record<string, unknown>;
 };
 
+export type OpenResponseHTTPResult = {
+  statusCode: number;
+  body: Record<string, unknown>;
+};
+
 export async function invokeGatewayTool(params: {
   config: OpenClawConfig;
   tool: string;
@@ -184,6 +189,73 @@ export async function invokeGatewayTool(params: {
     statusCode: response.status,
     body,
     invokeResult,
+  };
+}
+
+export async function invokeGatewayOpenResponse(params: {
+  config: OpenClawConfig;
+  body: Record<string, unknown>;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}): Promise<OpenResponseHTTPResult> {
+  const timeoutSignal = AbortSignal.timeout(params.timeoutMs);
+  const signal = createCombinedSignal([params.signal, timeoutSignal]);
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  const authHeader = resolveAuthHeader(params.config);
+  if (authHeader) {
+    headers.authorization = authHeader;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${resolveGatewayBaseUrl(params.config)}/v1/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(params.body),
+      signal,
+    });
+  } catch (error) {
+    throw new VaultGatewayError({
+      message: timeoutSignal.aborted
+        ? `gateway /v1/responses timed out after ${params.timeoutMs}ms`
+        : `gateway /v1/responses transport failure: ${String(error)}`,
+      code: timeoutSignal.aborted ? "COMMAND_TIMEOUT" : "TRANSPORT_ERROR",
+      category: "transport",
+      details: error,
+    });
+  }
+
+  const bodyUnknown = await response
+    .json()
+    .catch(() => ({ error: { message: "invalid JSON from /v1/responses" } }));
+  const body = asRecord(bodyUnknown) ?? {};
+  if (!response.ok) {
+    const errorObj = asRecord(body.error) ?? {};
+    const endpointUnavailable = response.status === 404 || response.status === 405 || response.status === 501;
+    throw new VaultGatewayError({
+      message:
+        readString(errorObj.message) ??
+        (endpointUnavailable
+          ? "gateway /v1/responses endpoint is unavailable"
+          : `gateway /v1/responses failed with status ${response.status}`),
+      code: endpointUnavailable
+        ? "RESPONSES_ENDPOINT_UNAVAILABLE"
+        : readString(errorObj.code) ?? "OPENRESPONSES_HTTP_ERROR",
+      category: response.status === 401 || response.status === 403
+        ? "auth"
+        : response.status >= 400 && response.status < 500
+        ? "validation"
+        : "transport",
+      details: { status_code: response.status, body: bodyUnknown },
+    });
+  }
+
+  return {
+    statusCode: response.status,
+    body,
   };
 }
 

@@ -1,12 +1,9 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import {
-  extractToolData,
-  extractToolEnvelope,
-  extractToolError,
-  invokeGatewayTool,
-  isToolSuccess,
-  type VaultGatewayError,
-} from "./vault-gateway-client.js";
+  resolveFactWithScopedProviders,
+  VaultFactResolutionError,
+  type FactResolutionFailureReason,
+} from "./vault-fact-resolver.js";
 import {
   resolveVaultRoute,
   type ResolverFailure,
@@ -29,7 +26,7 @@ type FactTask = {
 
 type FactTaskOutcome =
   | { status: "completed"; task: FactTask; value: unknown }
-  | { status: "failed"; task: FactTask; reason: string }
+  | { status: "failed"; task: FactTask; reason: string; reasonCode?: FactResolutionFailureReason }
   | { status: "timed_out"; task: FactTask; reason: string };
 
 export type VaultRouteEnrichmentTelemetry = {
@@ -42,6 +39,7 @@ export type VaultRouteEnrichmentTelemetry = {
   factTasksCompleted: number;
   factTasksFailed: number;
   factTasksTimedOut: number;
+  failureReasonCodes?: FactResolutionFailureReason[];
   retryStatus?: ResolverStatus;
   fallbackToUserReason?: string;
   elapsedMs: number;
@@ -207,14 +205,14 @@ function buildSyntheticSubjectFactTask(params: {
     index: params.index,
     inputKey: inputKey ?? "subject",
     factKey,
-    kind: "email_subject",
+    kind: "email_subject_generation",
     instructions: "Draft a concise email subject for the user's request.",
     requestText: params.requestText,
     batchGroup: "synthetic_subject",
     parallelizable: true,
     rawRequest: {
       fact_key: factKey,
-      kind: "email_subject",
+      kind: "email_subject_generation",
       parallelizable: true,
       batch_group: "synthetic_subject",
       request_text: params.requestText,
@@ -240,75 +238,6 @@ function mergeContextWithFacts(
   return context;
 }
 
-function buildFactResolverPrompt(task: FactTask): string {
-  const extra = shallowClone(task.rawRequest);
-  delete extra.fact_key;
-  delete extra.kind;
-  delete extra.parallelizable;
-  delete extra.batch_group;
-  delete extra.instructions;
-  delete extra.request_text;
-
-  const lines = [
-    "Resolve one missing fact for vault route enrichment.",
-    `fact_key: ${task.factKey}`,
-  ];
-  if (task.inputKey) {
-    lines.push(`input_key: ${task.inputKey}`);
-  }
-  if (task.kind) {
-    lines.push(`kind: ${task.kind}`);
-  }
-  if (task.instructions) {
-    lines.push(`instructions: ${task.instructions}`);
-  }
-  if (task.requestText) {
-    lines.push(`request_text: ${task.requestText}`);
-  }
-  if (Object.keys(extra).length > 0) {
-    lines.push(`context: ${JSON.stringify(extra)}`);
-  }
-  lines.push(`Return only JSON: {"${task.factKey}": <value_or_null>}. No markdown.`);
-  return lines.join("\n");
-}
-
-function readFactValueFromRecord(record: Record<string, unknown>, factKey: string): unknown {
-  if (Object.prototype.hasOwnProperty.call(record, factKey)) {
-    return record[factKey];
-  }
-
-  const factKeyInRecord = readString(record.fact_key) ?? readString(record.factKey);
-  if (factKeyInRecord && factKeyInRecord === factKey) {
-    if (Object.prototype.hasOwnProperty.call(record, "value")) {
-      return record.value;
-    }
-    if (Object.prototype.hasOwnProperty.call(record, "fact_value")) {
-      return record.fact_value;
-    }
-    if (Object.prototype.hasOwnProperty.call(record, "factValue")) {
-      return record.factValue;
-    }
-  }
-
-  const response = asRecord(record.response);
-  if (response) {
-    const nested = readFactValueFromRecord(response, factKey);
-    if (nested !== undefined) {
-      return nested;
-    }
-  }
-
-  const output = asRecord(record.output);
-  if (output) {
-    const nested = readFactValueFromRecord(output, factKey);
-    if (nested !== undefined) {
-      return nested;
-    }
-  }
-
-  return undefined;
-}
-
 function normalizeFactValue(value: unknown): unknown {
   if (typeof value !== "string") {
     return value;
@@ -324,77 +253,58 @@ function normalizeFactValue(value: unknown): unknown {
   return trimmed;
 }
 
-function extractFactValue(data: Record<string, unknown>, factKey: string): unknown {
-  const direct = readFactValueFromRecord(data, factKey);
-  if (direct !== undefined) {
-    return normalizeFactValue(direct);
-  }
-
-  const reply = data.reply;
-  if (typeof reply === "string") {
-    const parsed = parseJsonObject(reply);
-    if (parsed && Object.prototype.hasOwnProperty.call(parsed, factKey)) {
-      return parsed[factKey];
-    }
-    return reply.trim();
-  }
-  const replyRecord = asRecord(reply);
-  if (replyRecord) {
-    const nested = readFactValueFromRecord(replyRecord, factKey);
-    if (nested !== undefined) {
-      return normalizeFactValue(nested);
-    }
-  }
-
-  const result = asRecord(data.result);
-  if (result) {
-    const nested = readFactValueFromRecord(result, factKey);
-    if (nested !== undefined) {
-      return normalizeFactValue(nested);
-    }
-  }
-
-  return undefined;
-}
-
 function toGatewayError(error: unknown): string {
-  const parsed = error as VaultGatewayError;
-  if (typeof parsed?.message === "string" && parsed.message.trim().length > 0) {
-    return parsed.message;
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
   }
   return String(error);
 }
 
-async function resolveFactViaSessionsSend(params: {
-  config: OpenClawConfig;
-  sessionKey?: string;
-  task: FactTask;
-  timeoutMs: number;
-  signal: AbortSignal;
-}): Promise<unknown> {
-  const timeoutSeconds = Math.max(1, Math.ceil(Math.max(params.timeoutMs, 1000) / 1000));
-  const targetSession = params.sessionKey ?? "main";
-
-  const invoked = await invokeGatewayTool({
-    config: params.config,
-    tool: "sessions_send",
-    args: {
-      sessionKey: targetSession,
-      message: buildFactResolverPrompt(params.task),
-      timeoutSeconds,
-    },
-    sessionKey: params.sessionKey,
-    timeoutMs: params.timeoutMs,
-    signal: params.signal,
-  });
-
-  const envelope = extractToolEnvelope(invoked);
-  if (!isToolSuccess(envelope)) {
-    const error = extractToolError(envelope);
-    throw new Error(error.message ?? "sessions_send returned failure");
+function toFactFailureReason(error: unknown): FactResolutionFailureReason | undefined {
+  if (error instanceof VaultFactResolutionError) {
+    return error.reasonCode;
   }
-  const data = extractToolData(envelope);
-  return extractFactValue(data, params.task.factKey);
+  const record = error as {
+    reasonCode?: unknown;
+    code?: unknown;
+  };
+  if (typeof record.reasonCode === "string") {
+    return record.reasonCode as FactResolutionFailureReason;
+  }
+  if (record.code === "RESPONSES_ENDPOINT_UNAVAILABLE") {
+    return "safe_text_unavailable";
+  }
+  return undefined;
+}
+
+function normalizeDomain(value: string | undefined): string | undefined {
+  const trimmed = compact(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.toLowerCase();
+}
+
+function isDomainDeterministic(domain: string | undefined, allowList: string[]): boolean {
+  if (allowList.length === 0) {
+    return true;
+  }
+  const normalized = normalizeDomain(domain);
+  if (!normalized) {
+    return false;
+  }
+  const allowed = allowList.map((entry) => entry.trim().toLowerCase()).filter((entry) => entry.length > 0);
+  return allowed.includes(normalized);
+}
+
+function collectFailureReasonCodes(outcomes: FactTaskOutcome[]): FactResolutionFailureReason[] {
+  const reasons = new Set<FactResolutionFailureReason>();
+  for (const outcome of outcomes) {
+    if (outcome.status === "failed" && outcome.reasonCode) {
+      reasons.add(outcome.reasonCode);
+    }
+  }
+  return Array.from(reasons.values()).sort();
 }
 
 async function withTimeout<T>(params: {
@@ -509,6 +419,7 @@ async function runSingleFactTask(params: {
       status: "failed",
       task: params.task,
       reason: toGatewayError(error),
+      reasonCode: toFactFailureReason(error),
     };
   } finally {
     clearTimeout(taskTimer);
@@ -620,6 +531,7 @@ export async function resolveAndEnrichVaultRoute(params: {
   context?: Record<string, unknown>;
   enrichmentGlobalTimeoutMs: number;
   enrichmentTaskTimeoutMs: number;
+  deterministicDomains?: string[];
   resolveRoute?: RouteResolverFn;
   resolveFact?: FactResolverFn;
   onAutoFillStart?: (params: {
@@ -628,7 +540,7 @@ export async function resolveAndEnrichVaultRoute(params: {
 }): Promise<ResolveAndEnrichResult> {
   const startedAt = Date.now();
   const resolveRoute = params.resolveRoute ?? resolveVaultRoute;
-  const resolveFact = params.resolveFact ?? resolveFactViaSessionsSend;
+  const resolveFact = params.resolveFact ?? resolveFactWithScopedProviders;
 
   const defaultTelemetry = {
     usedGuidance: false,
@@ -712,6 +624,7 @@ export async function resolveAndEnrichVaultRoute(params: {
       ? [syntheticSubjectTask]
       : [];
   const effectiveAutoRetryCount = autoRetry.length + (syntheticSubjectTask ? 1 : 0);
+  const deterministicDomains = params.deterministicDomains ?? [];
 
   if (factTasks.length === 0) {
     return {
@@ -724,6 +637,23 @@ export async function resolveAndEnrichVaultRoute(params: {
         autoRetryCount: effectiveAutoRetryCount,
         autoRetryAttempted: true,
         fallbackToUserReason: "no_valid_fact_tasks",
+        elapsedMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  if (!isDomainDeterministic(initial.payload.domain, deterministicDomains)) {
+    return {
+      ...initial,
+      telemetry: {
+        ...defaultTelemetry,
+        usedGuidance: true,
+        guidanceCount: guidance.length,
+        askUserCount: askUser.length,
+        autoRetryCount: effectiveAutoRetryCount,
+        autoRetryAttempted: false,
+        failureReasonCodes: ["domain_not_deterministic"],
+        fallbackToUserReason: "domain_not_deterministic",
         elapsedMs: Date.now() - startedAt,
       },
     };
@@ -754,6 +684,32 @@ export async function resolveAndEnrichVaultRoute(params: {
       facts[outcome.task.factKey] = outcome.value;
     }
   }
+  const failureReasonCodes = collectFailureReasonCodes(taskOutcomes);
+
+  const completedCount = taskOutcomes.filter((outcome) => outcome.status === "completed").length;
+  const failedCount = taskOutcomes.filter((outcome) => outcome.status === "failed").length;
+  const timedOutCount = taskOutcomes.filter((outcome) => outcome.status === "timed_out").length;
+
+  if (completedCount === 0) {
+    return {
+      ...initial,
+      telemetry: {
+        ...defaultTelemetry,
+        usedGuidance: true,
+        guidanceCount: guidance.length,
+        askUserCount: askUser.length,
+        autoRetryCount: effectiveAutoRetryCount,
+        autoRetryAttempted: true,
+        factTasksStarted: factTasks.length,
+        factTasksCompleted: completedCount,
+        factTasksFailed: failedCount,
+        factTasksTimedOut: timedOutCount,
+        failureReasonCodes: failureReasonCodes.length > 0 ? failureReasonCodes : undefined,
+        fallbackToUserReason: failureReasonCodes[0] ?? "no_facts_resolved",
+        elapsedMs: Date.now() - startedAt,
+      },
+    };
+  }
 
   const retry = await resolveRoute({
     config: params.config,
@@ -774,9 +730,10 @@ export async function resolveAndEnrichVaultRoute(params: {
       autoRetryCount: effectiveAutoRetryCount,
       autoRetryAttempted: true,
       factTasksStarted: factTasks.length,
-      factTasksCompleted: taskOutcomes.filter((outcome) => outcome.status === "completed").length,
-      factTasksFailed: taskOutcomes.filter((outcome) => outcome.status === "failed").length,
-      factTasksTimedOut: taskOutcomes.filter((outcome) => outcome.status === "timed_out").length,
+      factTasksCompleted: completedCount,
+      factTasksFailed: failedCount,
+      factTasksTimedOut: timedOutCount,
+      failureReasonCodes: failureReasonCodes.length > 0 ? failureReasonCodes : undefined,
       retryStatus: retry.payload?.status,
       fallbackToUserReason:
         retry.payload?.status === "RESOLVED_MISSING_INPUTS" ? "retry_still_missing_inputs" : undefined,

@@ -667,6 +667,7 @@ export function createVaultCommandHandler(params: {
         sessionKey: executionSessionKey,
         enrichmentGlobalTimeoutMs: params.config.vaultCommand.enrichmentGlobalTimeoutMs,
         enrichmentTaskTimeoutMs: params.config.vaultCommand.enrichmentTaskTimeoutMs,
+        deterministicDomains: params.config.vaultCommand.deterministicDomains,
         onAutoFillStart: ({ tasks }) => {
           if (autoFillStartPosted) {
             return;
@@ -729,19 +730,13 @@ export function createVaultCommandHandler(params: {
             retry_status: resolved.telemetry.retryStatus,
             elapsed_ms: resolved.telemetry.elapsedMs,
             fallback_to_user_reason: resolved.telemetry.fallbackToUserReason,
+            failure_reason_codes: resolved.telemetry.failureReasonCodes,
           },
         });
       }
 
       if (payload.status === "RESOLVED_MISSING_INPUTS") {
         if (resolved.telemetry.autoRetryAttempted) {
-          if (params.config.vaultCommand.enableCoreFallback) {
-            return await runHybridFallback(
-              resolved.telemetry.factTasksCompleted > 0
-                ? "auto_enrich_retry_still_missing_inputs"
-                : "auto_enrich_retry_missing_inputs_no_facts_completed",
-            );
-          }
           if (resolved.telemetry.factTasksCompleted > 0) {
             return {
               text: partialAutoFillMessage(payload.missing_inputs ?? []),

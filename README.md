@@ -35,15 +35,21 @@ openclaw plugins install @vaultclaw/vaultclaw-mcp-approval-handoff
 ### Option B: one-shot installer script (local checkout)
 
 ```bash
-./scripts/install.sh
+./scripts/openclaw-plugin-install.sh
 ```
 
 This installer also applies OpenClaw core hotfixes (Telegram slash-command reload + plugin command session context passthrough for async follow-ups) and restarts the gateway automatically.
 
+Backward-compatible alias:
+
+```bash
+./scripts/install.sh
+```
+
 Optional npm/package override:
 
 ```bash
-./scripts/install.sh @vaultclaw/vaultclaw-mcp-approval-handoff
+./scripts/openclaw-plugin-install.sh @vaultclaw/vaultclaw-mcp-approval-handoff
 ```
 
 ## Config

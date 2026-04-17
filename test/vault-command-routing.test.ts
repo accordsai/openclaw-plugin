@@ -701,7 +701,7 @@ describe("createVaultCommandHandler missing-input routing", () => {
     });
   });
 
-  it("Case B: enrichment failure path emits interim progress then falls back in HYBRID mode", async () => {
+  it("Case B: enrichment failure path emits interim progress and asks user in HYBRID mode", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-failure-"));
     stateDirs.push(stateDir);
 
@@ -730,11 +730,6 @@ describe("createVaultCommandHandler missing-input routing", () => {
           elapsedMs: 10,
         },
       };
-    });
-
-    fallbackMock.mockResolvedValue({
-      ok: true,
-      message: "Fallback routed to standard OpenClaw flow.",
     });
 
     const handler = createVaultCommandHandler({
@@ -767,13 +762,12 @@ describe("createVaultCommandHandler missing-input routing", () => {
     expect(notifier.post.mock.calls[0]?.[0]?.text).toBe(
       "I found the Vault action. I am now gathering the missing details and will continue automatically. I am gathering the requested details now.",
     );
-    expect(result.text).toBe("Request routed to normal OpenClaw flow.");
+    expect(result.text).toBe("I could not get the missing details automatically. Please provide: subject.");
     expect(executeMock).not.toHaveBeenCalled();
-    expect(fallbackMock).toHaveBeenCalledTimes(1);
-    expect(fallbackMock.mock.calls[0]?.[0]?.sessionKey).toBe("agent:main:telegram:direct:509928323");
+    expect(fallbackMock).not.toHaveBeenCalled();
   });
 
-  it("Case B2: enrichment failure path falls back in STRICT mode after auto-enrichment attempt", async () => {
+  it("Case B2: enrichment failure path asks user in STRICT mode after auto-enrichment attempt", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-failure-strict-"));
     stateDirs.push(stateDir);
 
@@ -804,11 +798,6 @@ describe("createVaultCommandHandler missing-input routing", () => {
       };
     });
 
-    fallbackMock.mockResolvedValue({
-      ok: true,
-      message: "Fallback routed to standard OpenClaw flow.",
-    });
-
     const handler = createVaultCommandHandler({
       api: {
         config: {},
@@ -836,12 +825,12 @@ describe("createVaultCommandHandler missing-input routing", () => {
 
     const result = await handler(buildContext("send an email to skl83@cornell.edu with the weather for irvine, ca"));
     expect(notifier.post).toHaveBeenCalledTimes(1);
-    expect(result.text).toBe("Request routed to normal OpenClaw flow.");
+    expect(result.text).toBe("I could not get the missing details automatically. Please provide: subject.");
     expect(executeMock).not.toHaveBeenCalled();
-    expect(fallbackMock).toHaveBeenCalledTimes(1);
+    expect(fallbackMock).not.toHaveBeenCalled();
   });
 
-  it("Case C: multiple parallel fact requests emit one interim message and HYBRID continues via fallback", async () => {
+  it("Case C: multiple parallel fact requests emit one interim message and HYBRID asks user for remaining fields", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-parallel-"));
     stateDirs.push(stateDir);
 
@@ -874,11 +863,6 @@ describe("createVaultCommandHandler missing-input routing", () => {
         },
       };
     });
-    fallbackMock.mockResolvedValue({
-      ok: true,
-      message: "Fallback routed to standard OpenClaw flow.",
-    });
-
     const handler = createVaultCommandHandler({
       api: {
         config: {},
@@ -909,9 +893,9 @@ describe("createVaultCommandHandler missing-input routing", () => {
     expect(notifier.post.mock.calls[0]?.[0]?.text).toBe(
       "I found the Vault action. I am now gathering the missing details and will continue automatically. I am fetching weather details now.",
     );
-    expect(result.text).toBe("Request routed to normal OpenClaw flow.");
+    expect(result.text).toBe("I found some of what I need, but I still need one more detail from you: subject.");
     expect(executeMock).not.toHaveBeenCalled();
-    expect(fallbackMock).toHaveBeenCalledTimes(1);
+    expect(fallbackMock).not.toHaveBeenCalled();
   });
 
   it("Case D: ASK_USER mode does not emit auto-enrichment progress message", async () => {

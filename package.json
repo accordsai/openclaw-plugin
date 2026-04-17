@@ -7,8 +7,7 @@
     "index.ts",
     "openclaw.plugin.json",
     "src",
-    "scripts/install.sh",
-    "scripts/patch-openclaw-core.mjs",
+    "scripts",
     "README.md"
   ],
   "scripts": {
@@ -16,7 +15,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "openclaw": "^2026.3.0"
+    "openclaw": "2026.4.14"
   },
   "devDependencies": {
     "typescript": "^5.9.2",
