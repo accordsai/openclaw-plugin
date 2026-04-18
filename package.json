@@ -14,10 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "dependencies": {
-    "openclaw": "2026.4.14"
-  },
   "devDependencies": {
+    "openclaw": "2026.4.14",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
