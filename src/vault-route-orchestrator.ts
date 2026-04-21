@@ -1,6 +1,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import {
   resolveFactWithScopedProviders,
+  type SafeTextResolutionEvent,
   VaultFactResolutionError,
   type FactResolutionFailureReason,
 } from "./vault-fact-resolver.js";
@@ -25,9 +26,15 @@ type FactTask = {
 };
 
 type FactTaskOutcome =
-  | { status: "completed"; task: FactTask; value: unknown }
-  | { status: "failed"; task: FactTask; reason: string; reasonCode?: FactResolutionFailureReason }
-  | { status: "timed_out"; task: FactTask; reason: string };
+  | { status: "completed"; task: FactTask; value: unknown; resolutionEvents: SafeTextResolutionEvent[] }
+  | {
+    status: "failed";
+    task: FactTask;
+    reason: string;
+    reasonCode?: FactResolutionFailureReason;
+    resolutionEvents: SafeTextResolutionEvent[];
+  }
+  | { status: "timed_out"; task: FactTask; reason: string; resolutionEvents: SafeTextResolutionEvent[] };
 
 export type VaultRouteEnrichmentTelemetry = {
   usedGuidance: boolean;
@@ -39,6 +46,9 @@ export type VaultRouteEnrichmentTelemetry = {
   factTasksCompleted: number;
   factTasksFailed: number;
   factTasksTimedOut: number;
+  safeTextPrimaryUsed: number;
+  safeTextFallbackUsed: number;
+  safeTextFallbackFailed: number;
   failureReasonCodes?: FactResolutionFailureReason[];
   retryStatus?: ResolverStatus;
   fallbackToUserReason?: string;
@@ -68,6 +78,7 @@ type FactResolverFn = (params: {
   task: FactTask;
   timeoutMs: number;
   signal: AbortSignal;
+  onResolutionEvent?: (event: SafeTextResolutionEvent) => void;
 }) => Promise<unknown>;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -150,7 +161,7 @@ function buildFactTask(entry: ResolverMissingInputGuidance, index: number): Fact
     index,
     inputKey: compact(readString(entry.input_key)),
     factKey,
-    kind: compact(readString(request?.kind)),
+    kind: compact(readString(request?.fact_kind) ?? readString(request?.kind)),
     instructions: compact(readString(request?.instructions)),
     requestText: compact(readString(request?.request_text)),
     batchGroup,
@@ -307,6 +318,36 @@ function collectFailureReasonCodes(outcomes: FactTaskOutcome[]): FactResolutionF
   return Array.from(reasons.values()).sort();
 }
 
+function collectSafeTextEvents(outcomes: FactTaskOutcome[]): {
+  safeTextPrimaryUsed: number;
+  safeTextFallbackUsed: number;
+  safeTextFallbackFailed: number;
+} {
+  const counts = {
+    safeTextPrimaryUsed: 0,
+    safeTextFallbackUsed: 0,
+    safeTextFallbackFailed: 0,
+  };
+
+  for (const outcome of outcomes) {
+    for (const event of outcome.resolutionEvents) {
+      if (event === "safe_text_primary_used") {
+        counts.safeTextPrimaryUsed += 1;
+        continue;
+      }
+      if (event === "safe_text_fallback_used") {
+        counts.safeTextFallbackUsed += 1;
+        continue;
+      }
+      if (event === "safe_text_fallback_failed") {
+        counts.safeTextFallbackFailed += 1;
+      }
+    }
+  }
+
+  return counts;
+}
+
 async function withTimeout<T>(params: {
   task: FactTask;
   timeoutMs: number;
@@ -350,12 +391,14 @@ async function runSingleFactTask(params: {
   globalSignal: AbortSignal;
   resolveFact: FactResolverFn;
 }): Promise<FactTaskOutcome> {
+  const resolutionEvents: SafeTextResolutionEvent[] = [];
   const now = Date.now();
   if (now >= params.deadlineMs || params.globalSignal.aborted) {
     return {
       status: "timed_out",
       task: params.task,
       reason: `fact task timed out for ${params.task.factKey}`,
+      resolutionEvents,
     };
   }
 
@@ -379,6 +422,9 @@ async function runSingleFactTask(params: {
           task: params.task,
           timeoutMs,
           signal,
+          onResolutionEvent: (event) => {
+            resolutionEvents.push(event);
+          },
         }),
     });
     if (result.status === "timed_out") {
@@ -386,6 +432,7 @@ async function runSingleFactTask(params: {
         status: "timed_out",
         task: params.task,
         reason: result.reason,
+        resolutionEvents,
       };
     }
 
@@ -399,6 +446,7 @@ async function runSingleFactTask(params: {
         status: "failed",
         task: params.task,
         reason: `fact task returned empty value for ${params.task.factKey}`,
+        resolutionEvents,
       };
     }
 
@@ -406,6 +454,7 @@ async function runSingleFactTask(params: {
       status: "completed",
       task: params.task,
       value: normalized,
+      resolutionEvents,
     };
   } catch (error) {
     if (signal.aborted || params.globalSignal.aborted) {
@@ -413,6 +462,7 @@ async function runSingleFactTask(params: {
         status: "timed_out",
         task: params.task,
         reason: `fact task timed out for ${params.task.factKey}`,
+        resolutionEvents,
       };
     }
     return {
@@ -420,6 +470,7 @@ async function runSingleFactTask(params: {
       task: params.task,
       reason: toGatewayError(error),
       reasonCode: toFactFailureReason(error),
+      resolutionEvents,
     };
   } finally {
     clearTimeout(taskTimer);
@@ -552,6 +603,9 @@ export async function resolveAndEnrichVaultRoute(params: {
     factTasksCompleted: 0,
     factTasksFailed: 0,
     factTasksTimedOut: 0,
+    safeTextPrimaryUsed: 0,
+    safeTextFallbackUsed: 0,
+    safeTextFallbackFailed: 0,
     elapsedMs: 0,
   } satisfies Omit<VaultRouteEnrichmentTelemetry, "elapsedMs"> & { elapsedMs: number };
 
@@ -685,6 +739,7 @@ export async function resolveAndEnrichVaultRoute(params: {
     }
   }
   const failureReasonCodes = collectFailureReasonCodes(taskOutcomes);
+  const safeTextEvents = collectSafeTextEvents(taskOutcomes);
 
   const completedCount = taskOutcomes.filter((outcome) => outcome.status === "completed").length;
   const failedCount = taskOutcomes.filter((outcome) => outcome.status === "failed").length;
@@ -704,6 +759,9 @@ export async function resolveAndEnrichVaultRoute(params: {
         factTasksCompleted: completedCount,
         factTasksFailed: failedCount,
         factTasksTimedOut: timedOutCount,
+        safeTextPrimaryUsed: safeTextEvents.safeTextPrimaryUsed,
+        safeTextFallbackUsed: safeTextEvents.safeTextFallbackUsed,
+        safeTextFallbackFailed: safeTextEvents.safeTextFallbackFailed,
         failureReasonCodes: failureReasonCodes.length > 0 ? failureReasonCodes : undefined,
         fallbackToUserReason: failureReasonCodes[0] ?? "no_facts_resolved",
         elapsedMs: Date.now() - startedAt,
@@ -733,6 +791,9 @@ export async function resolveAndEnrichVaultRoute(params: {
       factTasksCompleted: completedCount,
       factTasksFailed: failedCount,
       factTasksTimedOut: timedOutCount,
+      safeTextPrimaryUsed: safeTextEvents.safeTextPrimaryUsed,
+      safeTextFallbackUsed: safeTextEvents.safeTextFallbackUsed,
+      safeTextFallbackFailed: safeTextEvents.safeTextFallbackFailed,
       failureReasonCodes: failureReasonCodes.length > 0 ? failureReasonCodes : undefined,
       retryStatus: retry.payload?.status,
       fallbackToUserReason:

@@ -42,6 +42,38 @@ function parsePeerFromAddress(value: string | undefined, channel: string): strin
   return trimmed;
 }
 
+function readAgentSessionKey(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.toLowerCase().startsWith("agent:")) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function parsePeerFromAgentSessionKey(value: string | undefined, channel: string): string | undefined {
+  const sessionKey = readAgentSessionKey(value);
+  if (!sessionKey) {
+    return undefined;
+  }
+  const normalizedChannel = channel.trim().toLowerCase();
+  const parts = sessionKey.split(":").filter((entry) => entry.length > 0);
+  if (parts.length < 5 || parts[0]?.toLowerCase() !== "agent") {
+    return undefined;
+  }
+  if (parts[2]?.toLowerCase() !== normalizedChannel) {
+    return undefined;
+  }
+  const directIndex = parts.findIndex((entry, index) => index >= 3 && entry.toLowerCase() === "direct");
+  if (directIndex < 0 || directIndex + 1 >= parts.length) {
+    return undefined;
+  }
+  const peer = parts.slice(directIndex + 1).join(":").trim();
+  return peer.length > 0 ? peer : undefined;
+}
+
 function isGroupOrChannelAddress(value: string | undefined): boolean {
   if (!value) {
     return false;
@@ -71,18 +103,28 @@ function buildChannelSessionKey(params: {
 
 export function buildVaultRouteContext(ctx: VaultPluginCommandContext): VaultRouteContext {
   const normalizedChannel = ctx.channel.trim().toLowerCase();
+  const sessionKeyCandidate = readAgentSessionKey(ctx.sessionKey);
+  const sessionIDCandidate = readAgentSessionKey(ctx.sessionId);
+  const sessionPeer = parsePeerFromAgentSessionKey(sessionKeyCandidate ?? sessionIDCandidate, ctx.channel);
+  const preferredSessionPeer = normalizedChannel === "webchat" ? sessionPeer : undefined;
   const channel = compact(normalizedChannel);
   const account = compact(ctx.accountId);
-  const sender = compact(
+  const keySender =
+    preferredSessionPeer ??
     ctx.senderId ??
-      parsePeerFromAddress(ctx.from, ctx.channel) ??
-      parsePeerFromAddress(ctx.to, ctx.channel),
+    parsePeerFromAddress(ctx.from, ctx.channel) ??
+    parsePeerFromAddress(ctx.to, ctx.channel) ??
+    sessionPeer;
+  const sender = compact(
+    keySender,
   );
   const thread = typeof ctx.messageThreadId === "number" ? String(ctx.messageThreadId) : "-";
 
   const key = `vault:${channel}:${account}:${sender}:${thread}`;
 
   const rawAgentCandidates = unique([
+    sessionKeyCandidate,
+    sessionIDCandidate,
     typeof ctx.from === "string" && ctx.from.trim().startsWith("agent:") ? ctx.from.trim() : undefined,
     typeof ctx.to === "string" && ctx.to.trim().startsWith("agent:") ? ctx.to.trim() : undefined,
   ]);
@@ -93,9 +135,11 @@ export function buildVaultRouteContext(ctx: VaultPluginCommandContext): VaultRou
   const peer =
     (isGroupOrChannelAddress(ctx.to) ? toPeer : undefined) ??
     (isGroupOrChannelAddress(ctx.from) ? fromPeer : undefined) ??
+    preferredSessionPeer ??
     senderPeer ??
     fromPeer ??
-    toPeer;
+    toPeer ??
+    sessionPeer;
 
   const senderFallbackPeer = sender !== "-" ? sender : undefined;
   const candidatePeer = peer ?? senderFallbackPeer;

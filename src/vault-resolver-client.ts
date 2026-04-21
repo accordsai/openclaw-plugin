@@ -32,6 +32,7 @@ export type ResolverExecution = {
 
 export type ResolverExternalFactRequest = {
   fact_key?: string;
+  fact_kind?: string;
   kind?: string;
   parallelizable?: boolean;
   batch_group?: string;

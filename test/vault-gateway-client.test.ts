@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { invokeGatewayOpenResponse } from "../src/vault-gateway-client.js";
+import { invokeGatewayChatCompletion, invokeGatewayOpenResponse } from "../src/vault-gateway-client.js";
 
 const TOKEN_CONFIG = {
   gateway: {
@@ -130,6 +130,69 @@ describe("invokeGatewayOpenResponse", () => {
       }),
     ).rejects.toMatchObject({
       code: "COMMAND_TIMEOUT",
+    });
+  });
+});
+
+describe("invokeGatewayChatCompletion", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("returns parsed body on success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            choices: [],
+            id: "chatcmpl_1",
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await invokeGatewayChatCompletion({
+      config: TOKEN_CONFIG,
+      body: {
+        model: "agent:main",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      timeoutMs: 1000,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body.id).toBe("chatcmpl_1");
+  });
+
+  it("maps disabled endpoint responses to CHAT_COMPLETIONS_ENDPOINT_UNAVAILABLE", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Not Found",
+            },
+          }),
+          { status: 404 },
+        ),
+      ),
+    );
+
+    await expect(
+      invokeGatewayChatCompletion({
+        config: TOKEN_CONFIG,
+        body: {
+          model: "agent:main",
+          messages: [{ role: "user", content: "hello" }],
+        },
+        timeoutMs: 1000,
+      }),
+    ).rejects.toMatchObject({
+      code: "CHAT_COMPLETIONS_ENDPOINT_UNAVAILABLE",
     });
   });
 });

@@ -82,4 +82,32 @@ describe("buildVaultRouteContext", () => {
 
     expect(context.sessionCandidates).toContain("agent:main:webchat:direct:gateway-client");
   });
+
+  it("uses webchat session key peer to isolate route key state per session", () => {
+    const context = buildVaultRouteContext(baseCtx({
+      channel: "webchat",
+      senderId: "cli",
+      sessionKey: "agent:agent-1:webchat:direct:session-alpha",
+    }));
+
+    expect(context.key).toBe("vault:webchat:-:session-alpha:-");
+    expect(context.sessionCandidates).toContain("agent:agent-1:webchat:direct:session-alpha");
+  });
+
+  it("produces distinct keys for distinct webchat sessions even with same sender id", () => {
+    const first = buildVaultRouteContext(baseCtx({
+      channel: "webchat",
+      senderId: "cli",
+      sessionKey: "agent:agent-1:webchat:direct:session-one",
+    }));
+    const second = buildVaultRouteContext(baseCtx({
+      channel: "webchat",
+      senderId: "cli",
+      sessionKey: "agent:agent-1:webchat:direct:session-two",
+    }));
+
+    expect(first.key).toBe("vault:webchat:-:session-one:-");
+    expect(second.key).toBe("vault:webchat:-:session-two:-");
+    expect(first.key).not.toBe(second.key);
+  });
 });

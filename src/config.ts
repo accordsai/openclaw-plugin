@@ -21,9 +21,9 @@ export const DEFAULT_CONFIG: PluginConfig = {
     enableCoreFallback: true,
     coreFallbackTimeoutMs: 30000,
     resolverTool: "vaultclaw_route_resolve",
-    resolverTimeoutMs: 8000,
-    enrichmentGlobalTimeoutMs: 10000,
-    enrichmentTaskTimeoutMs: 6000,
+    resolverTimeoutMs: 3500,
+    enrichmentGlobalTimeoutMs: 4500,
+    enrichmentTaskTimeoutMs: 2200,
     deterministicDomains: ["google.gmail", "generic.http"],
   },
 };

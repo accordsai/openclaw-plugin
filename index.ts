@@ -7,7 +7,95 @@ import { createGatewayAgentResumeInvoker } from "./src/resume-invoker.js";
 import { extractToolResultToolName, resolveSessionContext } from "./src/session-context.js";
 import { maybeDisableTelegramNativeCommands } from "./src/telegram-native-commands-guard.js";
 import { createVaultCommandHandler } from "./src/vault-command.js";
+import type { VaultPluginCommandContext } from "./src/vault-command-types.js";
 import { createGatewayToolsInvokeWaitInvoker } from "./src/wait-invoker.js";
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseVaultArgsFromText(text: string | undefined): string | undefined {
+  const trimmed = readNonEmptyString(text);
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const parseLine = (line: string): string | undefined => {
+    const normalized = line.replace(/^user\s*:\s*/i, "").trim();
+    const lineMatch = normalized.match(/^\/?vault(?:\s+([\s\S]*))?$/i);
+    if (!lineMatch) {
+      return undefined;
+    }
+    return lineMatch[1]?.trim() ?? "";
+  };
+
+  const directMatch = parseLine(trimmed);
+  if (directMatch !== undefined) {
+    return directMatch;
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  let matchedArgs: string | undefined;
+  for (const line of lines) {
+    const parsed = parseLine(line);
+    if (parsed !== undefined) {
+      matchedArgs = parsed;
+    }
+  }
+  return matchedArgs;
+}
+
+function parseVaultDispatchArgs(event: unknown): string | undefined {
+  const record = event as Record<string, unknown> | undefined;
+  return (
+    parseVaultArgsFromText(readNonEmptyString(record?.body)) ??
+    parseVaultArgsFromText(readNonEmptyString(record?.content))
+  );
+}
+
+function buildCommandContext(params: {
+  api: OpenClawPluginApi;
+  args: string;
+  channel: string;
+  channelId?: string;
+  senderId?: string;
+  accountId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  sessionFile?: string;
+  gatewayClientScopes?: string[];
+  from?: string;
+  to?: string;
+  messageThreadId?: string | number;
+  threadParentId?: string;
+  isAuthorizedSender?: boolean;
+}): VaultPluginCommandContext {
+  return {
+    senderId: params.senderId,
+    channel: params.channel,
+    channelId: params.channelId as any,
+    isAuthorizedSender: params.isAuthorizedSender ?? true,
+    gatewayClientScopes: params.gatewayClientScopes,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    sessionFile: params.sessionFile,
+    args: params.args,
+    commandBody: params.args.length > 0 ? `vault ${params.args}` : "vault",
+    config: params.api.config,
+    from: params.from,
+    to: params.to,
+    accountId: params.accountId,
+    messageThreadId: params.messageThreadId,
+    threadParentId: params.threadParentId,
+    requestConversationBinding: async () => ({ created: false } as any),
+    detachConversationBinding: async () => ({ removed: false }),
+    getCurrentConversationBinding: async () => null,
+  };
+}
 
 const plugin = {
   id: "vaultclaw-mcp-approval-handoff",
@@ -100,17 +188,89 @@ const plugin = {
       notifier,
     });
 
+    const vaultCommandHandler = createVaultCommandHandler({
+      api,
+      manager,
+      config,
+      notifier,
+    });
+
     api.registerCommand({
       name: "vault",
       description: "Deterministic Vaultclaw route + execute path.",
       acceptsArgs: true,
       requireAuth: false,
-      handler: createVaultCommandHandler({
+      handler: vaultCommandHandler,
+    });
+
+    api.on("before_dispatch", async (event: any, ctx: any) => {
+      const args = parseVaultDispatchArgs(event);
+      if (args === undefined) {
+        return;
+      }
+
+      const channel = readNonEmptyString(event?.channel) ?? readNonEmptyString(ctx?.channelId) ?? "main";
+      const commandCtx = buildCommandContext({
         api,
-        manager,
-        config,
-        notifier,
-      }),
+        args,
+        channel,
+        channelId: readNonEmptyString(ctx?.channelId),
+        senderId: readNonEmptyString(ctx?.senderId) ?? readNonEmptyString(event?.senderId),
+        accountId: readNonEmptyString(ctx?.accountId) ?? readNonEmptyString(event?.accountId),
+        sessionKey: readNonEmptyString(ctx?.sessionKey),
+        sessionId: readNonEmptyString(ctx?.sessionId),
+        sessionFile: readNonEmptyString(ctx?.sessionFile),
+        gatewayClientScopes: Array.isArray(ctx?.gatewayClientScopes)
+          ? ctx.gatewayClientScopes.filter((entry: unknown): entry is string => typeof entry === "string")
+          : undefined,
+        from: readNonEmptyString(event?.from),
+        to: readNonEmptyString(event?.to),
+        messageThreadId:
+          typeof event?.threadId === "string" || typeof event?.threadId === "number"
+            ? event.threadId
+            : undefined,
+        threadParentId: readNonEmptyString(event?.parentConversationId),
+        isAuthorizedSender:
+          typeof event?.commandAuthorized === "boolean" ? event.commandAuthorized : true,
+      });
+
+      const result = await vaultCommandHandler(commandCtx);
+      const text = readNonEmptyString((result as Record<string, unknown> | undefined)?.text);
+      return text ? { handled: true, text } : { handled: true };
+    });
+
+    // HTTP /v1/chat* ingress (Controlplane path) lands in before_agent_reply with cleanedBody.
+    // Keep /vault interception here so command handling remains deterministic even when
+    // before_dispatch does not run for this transport path.
+    api.on("before_agent_reply", async (event: any, ctx: any) => {
+      const args = parseVaultArgsFromText(readNonEmptyString(event?.cleanedBody));
+      if (args === undefined) {
+        return;
+      }
+
+      const channel = readNonEmptyString(ctx?.channelId) ?? readNonEmptyString(ctx?.messageProvider) ?? "main";
+      const commandCtx = buildCommandContext({
+        api,
+        args,
+        channel,
+        channelId: readNonEmptyString(ctx?.channelId),
+        senderId: readNonEmptyString(ctx?.senderId),
+        accountId: readNonEmptyString(ctx?.accountId),
+        sessionKey: readNonEmptyString(ctx?.sessionKey),
+        sessionId: readNonEmptyString(ctx?.sessionId),
+        sessionFile: readNonEmptyString(ctx?.sessionFile),
+        gatewayClientScopes: Array.isArray(ctx?.gatewayClientScopes)
+          ? ctx.gatewayClientScopes.filter((entry: unknown): entry is string => typeof entry === "string")
+          : undefined,
+        isAuthorizedSender: true,
+      });
+
+      const result = await vaultCommandHandler(commandCtx);
+      const text = readNonEmptyString((result as Record<string, unknown> | undefined)?.text);
+      return {
+        handled: true,
+        reply: text ? { text } : { text: "Vault command processed." },
+      };
     });
 
     api.on("after_tool_call", (event: any, ctx: any) => {

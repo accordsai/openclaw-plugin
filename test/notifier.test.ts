@@ -389,6 +389,101 @@ describe("createApprovalNotifier", () => {
     );
   });
 
+  it("retries webchat chat.inject once when session is not found", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({
+        runCommandWithTimeout: vi.fn()
+          .mockResolvedValueOnce({
+            stdout: JSON.stringify({
+              ok: false,
+              error: {
+                message: "session not found",
+              },
+            }),
+            stderr: "",
+            code: 0,
+            signal: null,
+            killed: false,
+            termination: "exit",
+          })
+          .mockResolvedValueOnce({
+            stdout: "{\"ok\":true}",
+            stderr: "",
+            code: 0,
+            signal: null,
+            killed: false,
+            termination: "exit",
+          }),
+      });
+      harness.notifier.post({
+        sessionKey: "agent:main:webchat:direct:gateway-client",
+        reason: "approval-allow",
+        text: "Approval allowed in Vaultclaw UI. Continuing automatically.",
+        contextKey: "approval:abc",
+      });
+
+      await Promise.resolve();
+      expect(harness.runCommandWithTimeout).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(160);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.runCommandWithTimeout).toHaveBeenCalledTimes(2);
+      expect(harness.enqueueSystemEvent).not.toHaveBeenCalled();
+      expect(harness.warn).toHaveBeenCalledWith(
+        expect.stringContaining("webchat chat.inject session not found, retrying once"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back after retry when webchat chat.inject keeps returning session-not-found", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({
+        runCommandWithTimeout: vi.fn()
+          .mockResolvedValueOnce({
+            stdout: "",
+            stderr: "session not found",
+            code: 1,
+            signal: null,
+            killed: false,
+            termination: "exit",
+          })
+          .mockResolvedValueOnce({
+            stdout: "",
+            stderr: "session not found",
+            code: 1,
+            signal: null,
+            killed: false,
+            termination: "exit",
+          }),
+      });
+      harness.notifier.post({
+        sessionKey: "agent:main:webchat:direct:gateway-client",
+        reason: "approval-allow",
+        text: "Approval allowed in Vaultclaw UI. Continuing automatically.",
+        contextKey: "approval:abc",
+      });
+
+      await Promise.resolve();
+      expect(harness.runCommandWithTimeout).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(160);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.runCommandWithTimeout).toHaveBeenCalledTimes(2);
+      expect(harness.enqueueSystemEvent).toHaveBeenCalledTimes(1);
+      expect(harness.warn).toHaveBeenCalledWith(
+        expect.stringContaining("webchat chat.inject failed, falling back to system event"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("falls back when whatsapp runtime direct send is unavailable", () => {
     const harness = createHarness({ disableWhatsApp: true });
     harness.notifier.post({

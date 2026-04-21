@@ -168,6 +168,133 @@ describe("resolveAndEnrichVaultRoute", () => {
     expect(onAutoFillStart.mock.calls[0]?.[0]?.tasks).toHaveLength(2);
   });
 
+  it("captures safe-text primary/fallback telemetry events during enrichment", async () => {
+    const resolveRoute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rawEnvelope: {},
+        payload: missingPayload({
+          missingInputs: ["subject", "text_plain"],
+          progressHintMode: "AUTO_ENRICH_AND_RETRY",
+          guidance: [
+            {
+              input_key: "subject",
+              resolution_mode: "AUTO_RETRY_WITH_FACTS",
+              external_fact_request: {
+                fact_key: "email_subject",
+                kind: "email_subject_generation",
+                parallelizable: true,
+                batch_group: "gmail_dual",
+                request_text: "Draft email subject",
+              },
+            },
+            {
+              input_key: "text_plain",
+              resolution_mode: "AUTO_RETRY_WITH_FACTS",
+              external_fact_request: {
+                fact_key: "email_body",
+                kind: "email_body_generation",
+                parallelizable: true,
+                batch_group: "gmail_dual",
+                request_text: "Draft email body",
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        rawEnvelope: {},
+        payload: {
+          status: "RESOLVED_EXECUTABLE",
+          execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        } satisfies ResolverPayload,
+      });
+
+    const resolveFact = vi.fn().mockImplementation(async ({ task, onResolutionEvent }) => {
+      if (task.factKey === "email_subject") {
+        onResolutionEvent?.("safe_text_primary_used");
+        return "Hello";
+      }
+      onResolutionEvent?.("safe_text_fallback_used");
+      return "Hi there.";
+    });
+
+    const result = await resolveAndEnrichVaultRoute({
+      config: {} as any,
+      resolverTool: "vaultclaw_route_resolve",
+      requestText: "send a hello email",
+      resolverTimeoutMs: 3000,
+      sessionKey: "main",
+      enrichmentGlobalTimeoutMs: 5000,
+      enrichmentTaskTimeoutMs: 2000,
+      resolveRoute,
+      resolveFact,
+    });
+
+    expect(result.payload?.status).toBe("RESOLVED_EXECUTABLE");
+    expect(result.telemetry.safeTextPrimaryUsed).toBe(1);
+    expect(result.telemetry.safeTextFallbackUsed).toBe(1);
+    expect(result.telemetry.safeTextFallbackFailed).toBe(0);
+  });
+
+  it("uses external_fact_request.fact_kind when provided", async () => {
+    const resolveRoute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rawEnvelope: {},
+        payload: missingPayload({
+          missingInputs: ["custom_message"],
+          progressHintMode: "AUTO_ENRICH_AND_RETRY",
+          guidance: [
+            {
+              input_key: "custom_message",
+              resolution_mode: "AUTO_RETRY_WITH_FACTS",
+              external_fact_request: {
+                fact_key: "custom_message",
+                fact_kind: "text_field_generation",
+                parallelizable: true,
+                batch_group: "custom_text",
+                request_text: "generate custom message",
+              },
+            },
+          ],
+        }),
+      })
+      .mockImplementationOnce(async (params) => {
+        const facts = (params.context as Record<string, unknown> | undefined)?.facts as
+          | Record<string, unknown>
+          | undefined;
+        expect(facts?.custom_message).toBe("Hello from fact_kind.");
+        return {
+          rawEnvelope: {},
+          payload: {
+            status: "RESOLVED_EXECUTABLE",
+            execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+          } satisfies ResolverPayload,
+        };
+      });
+
+    const resolveFact = vi.fn().mockImplementation(async ({ task }) => {
+      expect(task.kind).toBe("text_field_generation");
+      return "Hello from fact_kind.";
+    });
+
+    const result = await resolveAndEnrichVaultRoute({
+      config: {} as any,
+      resolverTool: "vaultclaw_route_resolve",
+      requestText: "create a custom message",
+      resolverTimeoutMs: 3000,
+      sessionKey: "main",
+      enrichmentGlobalTimeoutMs: 5000,
+      enrichmentTaskTimeoutMs: 2000,
+      resolveRoute,
+      resolveFact,
+    });
+
+    expect(result.payload?.status).toBe("RESOLVED_EXECUTABLE");
+    expect(resolveFact).toHaveBeenCalledTimes(1);
+  });
+
   it("Generic HTTP missing url: fills AUTO_RETRY fact and retry is executable", async () => {
     const resolveRoute = vi
       .fn()

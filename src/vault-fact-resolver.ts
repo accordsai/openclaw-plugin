@@ -1,11 +1,20 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { invokeGatewayOpenResponse, VaultGatewayError } from "./vault-gateway-client.js";
+import {
+  invokeGatewayChatCompletion,
+  invokeGatewayOpenResponse,
+  VaultGatewayError,
+} from "./vault-gateway-client.js";
 
 export type FactResolutionFailureReason =
   | "unsupported_fact_kind"
   | "domain_not_deterministic"
   | "safe_text_unavailable"
   | "weather_fetch_failed";
+
+export type SafeTextResolutionEvent =
+  | "safe_text_primary_used"
+  | "safe_text_fallback_used"
+  | "safe_text_fallback_failed";
 
 export class VaultFactResolutionError extends Error {
   readonly reasonCode: FactResolutionFailureReason;
@@ -306,6 +315,23 @@ function parseSafeTextFact(text: string, factKey: string): unknown {
   return cleaned;
 }
 
+function parseStrictSafeTextFact(text: string, factKey: string): unknown {
+  const cleaned = stripCodeFences(text);
+  if (!cleaned) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(cleaned) as unknown;
+    const parsedRecord = asRecord(parsed);
+    if (parsedRecord && Object.prototype.hasOwnProperty.call(parsedRecord, factKey)) {
+      return parsedRecord[factKey];
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function extractOpenResponseText(body: Record<string, unknown>): string | undefined {
   const direct = readString(body.output_text);
   if (direct) {
@@ -331,6 +357,41 @@ function extractOpenResponseText(body: Record<string, unknown>): string | undefi
     }
   }
 
+  return undefined;
+}
+
+function extractChatCompletionText(body: Record<string, unknown>): string | undefined {
+  const choices = Array.isArray(body.choices) ? body.choices : [];
+  for (const item of choices) {
+    const row = asRecord(item);
+    if (!row) {
+      continue;
+    }
+    const message = asRecord(row.message);
+    if (!message) {
+      continue;
+    }
+    const direct = readString(message.content);
+    if (direct) {
+      return direct;
+    }
+    const parts = Array.isArray(message.content) ? message.content : [];
+    const textParts: string[] = [];
+    for (const part of parts) {
+      if (typeof part === "string" && part.trim().length > 0) {
+        textParts.push(part.trim());
+        continue;
+      }
+      const partRow = asRecord(part);
+      const partText = readString(partRow?.text);
+      if (partText) {
+        textParts.push(partText);
+      }
+    }
+    if (textParts.length > 0) {
+      return textParts.join("\n");
+    }
+  }
   return undefined;
 }
 
@@ -372,10 +433,91 @@ function resolveAgentModel(sessionKey: string | undefined): string {
   return "agent:main";
 }
 
+function isResponsesEndpointUnavailable(error: unknown): boolean {
+  return error instanceof VaultGatewayError && error.code === "RESPONSES_ENDPOINT_UNAVAILABLE";
+}
+
+function resolveSafeTextBudget(timeoutMs: number): {
+  primaryTimeoutMs: number;
+  fallbackTimeoutMs: number;
+} {
+  const total = Math.max(1, timeoutMs);
+  const primaryTimeoutMs = Math.max(1, Math.floor(total * 0.65));
+  const fallbackTimeoutMs = Math.max(1, total - primaryTimeoutMs);
+  return {
+    primaryTimeoutMs,
+    fallbackTimeoutMs,
+  };
+}
+
+function isTransientSafeTextError(error: unknown): boolean {
+  if (error instanceof VaultGatewayError) {
+    if (error.code === "RESPONSES_ENDPOINT_UNAVAILABLE" || error.code === "CHAT_COMPLETIONS_ENDPOINT_UNAVAILABLE") {
+      return false;
+    }
+    if (error.category === "transport") {
+      return true;
+    }
+    if (error.code === "COMMAND_TIMEOUT" || error.code === "TRANSPORT_ERROR") {
+      return true;
+    }
+  }
+  const text = String(error ?? "").toLowerCase();
+  return (
+    text.includes("timed out") ||
+    text.includes("timeout") ||
+    text.includes("abort") ||
+    text.includes("transport failure") ||
+    text.includes("econnreset") ||
+    text.includes("enotfound")
+  );
+}
+
+function computeBudgetDeadline(timeoutMs: number): number {
+  return Date.now() + Math.max(1, timeoutMs);
+}
+
+function remainingBudget(deadlineMs: number): number {
+  return Math.max(0, deadlineMs - Date.now());
+}
+
+async function runSafeTextWithTransientRetry<T>(params: {
+  deadlineMs: number;
+  signal: AbortSignal;
+  maxAttempts: number;
+  runAttempt: (timeoutMs: number) => Promise<T>;
+}): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= Math.max(1, params.maxAttempts); attempt += 1) {
+    const remainingMs = remainingBudget(params.deadlineMs);
+    if (remainingMs <= 0 || params.signal.aborted) {
+      break;
+    }
+    try {
+      return await params.runAttempt(Math.max(1, remainingMs));
+    } catch (error) {
+      lastError = error;
+      const shouldRetry =
+        !params.signal.aborted &&
+        attempt < params.maxAttempts &&
+        isTransientSafeTextError(error) &&
+        remainingBudget(params.deadlineMs) > 200;
+      if (!shouldRetry) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new Error("safe text resolution budget exceeded");
+}
+
 function isSafeTextFact(task: ScopedFactTask): boolean {
   const kind = toLower(task.kind);
   const factKey = toLower(task.factKey);
-  if (kind === "email_subject_generation" || kind === "email_body_generation") {
+  if (
+    kind === "email_subject_generation" ||
+    kind === "email_body_generation" ||
+    kind === "text_field_generation"
+  ) {
     return true;
   }
   if (kind === "email_subject" || kind === "email_body") {
@@ -390,29 +532,90 @@ async function resolveSafeTextFact(params: {
   task: ScopedFactTask;
   timeoutMs: number;
   signal: AbortSignal;
+  onResolutionEvent?: (event: SafeTextResolutionEvent) => void;
 }): Promise<unknown> {
   const prompt = buildSafeTextPrompt(params.task);
+  const budget = resolveSafeTextBudget(params.timeoutMs);
+  const totalDeadlineMs = computeBudgetDeadline(params.timeoutMs);
+  const primaryDeadlineMs = totalDeadlineMs - budget.fallbackTimeoutMs;
+  const fallbackDeadlineMs = totalDeadlineMs;
+  const emit = (event: SafeTextResolutionEvent) => {
+    params.onResolutionEvent?.(event);
+  };
+
+  const tryFallbackCompletion = async (): Promise<unknown> => {
+    let fallbackBody: Record<string, unknown>;
+    try {
+      const fallback = await runSafeTextWithTransientRetry({
+        deadlineMs: fallbackDeadlineMs,
+        signal: params.signal,
+        maxAttempts: 2,
+        runAttempt: async (attemptTimeoutMs) =>
+          await invokeGatewayChatCompletion({
+            config: params.config,
+            body: {
+              model: resolveAgentModel(params.sessionKey),
+              messages: [
+                {
+                  role: "user",
+                  content: prompt,
+                },
+              ],
+              stream: false,
+              max_tokens: 280,
+              temperature: 0,
+            },
+            timeoutMs: Math.min(attemptTimeoutMs, budget.fallbackTimeoutMs),
+            signal: params.signal,
+          }),
+      });
+      fallbackBody = fallback.body;
+    } catch (error) {
+      emit("safe_text_fallback_failed");
+      throw new VaultFactResolutionError({
+        reasonCode: "safe_text_unavailable",
+        message: `safe text fallback generation failed: ${String(error)}`,
+      });
+    }
+
+    const fallbackText = extractChatCompletionText(fallbackBody);
+    const fallbackValue = fallbackText ? parseStrictSafeTextFact(fallbackText, params.task.factKey) : undefined;
+    if (fallbackValue === undefined || fallbackValue === null) {
+      emit("safe_text_fallback_failed");
+      throw new VaultFactResolutionError({
+        reasonCode: "safe_text_unavailable",
+        message: "safe text fallback returned malformed JSON output",
+      });
+    }
+
+    emit("safe_text_fallback_used");
+    return fallbackValue;
+  };
+
   let responseBody: Record<string, unknown>;
   try {
-    const response = await invokeGatewayOpenResponse({
-      config: params.config,
-      body: {
-        model: resolveAgentModel(params.sessionKey),
-        input: prompt,
-        stream: false,
-        tool_choice: "none",
-        max_output_tokens: 280,
-      },
-      timeoutMs: params.timeoutMs,
+    const response = await runSafeTextWithTransientRetry({
+      deadlineMs: Math.max(Date.now() + 1, primaryDeadlineMs),
       signal: params.signal,
+      maxAttempts: 2,
+      runAttempt: async (attemptTimeoutMs) =>
+        await invokeGatewayOpenResponse({
+          config: params.config,
+          body: {
+            model: resolveAgentModel(params.sessionKey),
+            input: prompt,
+            stream: false,
+            tool_choice: "none",
+            max_output_tokens: 280,
+          },
+          timeoutMs: Math.min(attemptTimeoutMs, budget.primaryTimeoutMs),
+          signal: params.signal,
+        }),
     });
     responseBody = response.body;
   } catch (error) {
-    if (error instanceof VaultGatewayError && error.code === "RESPONSES_ENDPOINT_UNAVAILABLE") {
-      throw new VaultFactResolutionError({
-        reasonCode: "safe_text_unavailable",
-        message: "safe text generation endpoint is unavailable",
-      });
+    if (isResponsesEndpointUnavailable(error) || isTransientSafeTextError(error)) {
+      return await tryFallbackCompletion();
     }
     throw new VaultFactResolutionError({
       reasonCode: "safe_text_unavailable",
@@ -427,7 +630,9 @@ async function resolveSafeTextFact(params: {
       message: "safe text generation returned no output",
     });
   }
-  return parseSafeTextFact(outputText, params.task.factKey);
+  const value = parseSafeTextFact(outputText, params.task.factKey);
+  emit("safe_text_primary_used");
+  return value;
 }
 
 function resolveConnectorInputFact(task: ScopedFactTask): unknown {
@@ -464,6 +669,7 @@ export async function resolveFactWithScopedProviders(params: {
   task: ScopedFactTask;
   timeoutMs: number;
   signal: AbortSignal;
+  onResolutionEvent?: (event: SafeTextResolutionEvent) => void;
 }): Promise<unknown> {
   const kind = toLower(params.task.kind);
   const factKey = toLower(params.task.factKey);

@@ -279,37 +279,60 @@ function tryChatInject(params: {
   });
 
   try {
-    void run(
-      [
-        "openclaw",
-        "gateway",
-        "call",
-        "chat.inject",
-        "--json",
-        "--timeout",
-        "10000",
-        "--params",
-        payload,
-      ],
-      {
-        timeoutMs: 12000,
-        maxBuffer: 512 * 1024,
-      },
-    ).then((result) => {
-      if (result.code !== 0) {
-        throw new Error(
-          `chat.inject failed (code=${String(result.code)}): ${readString(result.stderr) ?? readString(result.stdout) ?? "unknown error"}`,
+    void (async () => {
+      const maxAttempts = 2;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const result = await run(
+          [
+            "openclaw",
+            "gateway",
+            "call",
+            "chat.inject",
+            "--json",
+            "--timeout",
+            "10000",
+            "--params",
+            payload,
+          ],
+          {
+            timeoutMs: 12000,
+            maxBuffer: 512 * 1024,
+          },
         );
+
+        let errorMessage: string | undefined;
+        if (result.code !== 0) {
+          errorMessage =
+            readString(result.stderr) ??
+            readString(result.stdout) ??
+            `chat.inject failed (code=${String(result.code)})`;
+        } else {
+          const parsed = parseJsonObject(result.stdout);
+          if (parsed?.ok === false) {
+            const errorObj =
+              parsed.error && typeof parsed.error === "object" && !Array.isArray(parsed.error)
+                ? (parsed.error as Record<string, unknown>)
+                : undefined;
+            errorMessage = readString(errorObj?.message) ?? "chat.inject returned ok=false";
+          }
+        }
+
+        if (!errorMessage) {
+          return;
+        }
+
+        const canRetry = attempt < maxAttempts && isSessionNotFoundError(errorMessage);
+        if (canRetry) {
+          params.api.logger.warn(
+            `[vaultclaw-approval-handoff] ${params.targetLabel} chat.inject session not found, retrying once`,
+          );
+          await wait(150);
+          continue;
+        }
+
+        throw new Error(errorMessage);
       }
-      const parsed = parseJsonObject(result.stdout);
-      if (parsed?.ok === false) {
-        const errorObj =
-          parsed.error && typeof parsed.error === "object" && !Array.isArray(parsed.error)
-            ? (parsed.error as Record<string, unknown>)
-            : undefined;
-        throw new Error(readString(errorObj?.message) ?? "chat.inject returned ok=false");
-      }
-    }).catch((error: unknown) => {
+    })().catch((error: unknown) => {
       params.api.logger.warn(
         `[vaultclaw-approval-handoff] ${params.targetLabel} chat.inject failed, falling back to system event: ${String(error)}`,
       );
@@ -323,6 +346,20 @@ function tryChatInject(params: {
     params.fallback();
     return true;
   }
+}
+
+function isSessionNotFoundError(message: string | undefined): boolean {
+  const normalized = message?.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("session not found") || normalized.includes("unknown session");
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export function parseChannelTargetFromSessionKey(sessionKey: string): ChannelTarget | undefined {
