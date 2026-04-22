@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ApprovalHandoffManager } from "./approval-manager.js";
 import { parseApprovalRequiredResult } from "./approval-payload.js";
+import { buildStructuredApprovalReply } from "./chat-approval.js";
 import { approvalRequiredMessage } from "./messages.js";
 import { parseChannelTargetFromSessionKey } from "./notifier.js";
 import type { ApprovalNotifier, PluginConfig, VaultCommandMode } from "./types.js";
@@ -435,6 +436,10 @@ function approvalResponseMessage(
   envelope: Record<string, unknown>,
   maxWaitMs: number,
 ): string {
+  const structured = buildStructuredApprovalReply(envelope, maxWaitMs);
+  if (structured?.text) {
+    return structured.text;
+  }
   const parsed = parseApprovalRequiredResult(envelope);
   if (parsed.type !== "approval") {
     return approvalQueuedMessage();
@@ -785,6 +790,7 @@ export function createVaultCommandHandler(params: {
       const autoFillSucceeded = resolved.telemetry.autoRetryAttempted;
       const withAutoFillPrefix = (message: string): string =>
         autoFillSucceeded ? `${autoFillSuccessMessagePrefix()} ${message}` : message;
+      const skipApprovalAutoWait = Boolean((ctx as Record<string, unknown>)?.skipApprovalAutoWait);
 
       const executed = await executeResolvedVaultRoute({
         config: params.api.config,
@@ -808,24 +814,34 @@ export function createVaultCommandHandler(params: {
           event: "vault_approval_detected",
           routeKey: routeContext.key,
         });
-        params.manager.onAfterToolCall(
-          {
-            toolName: executed.toolName,
-            result: executed.envelope,
-          },
-          {
-            sessionKey: executionSessionKey,
-            sessionId: executionSessionId,
-            deliverySessionKey: deliveryTarget.sessionKey,
-            deliverySessionId: deliveryTarget.sessionId,
-            deliveryTargetReason: deliveryTarget.reason,
-            skipInitialRequiredNotification: true,
-          },
-        );
+        if (!skipApprovalAutoWait) {
+          params.manager.onAfterToolCall(
+            {
+              toolName: executed.toolName,
+              result: executed.envelope,
+            },
+            {
+              sessionKey: executionSessionKey,
+              sessionId: executionSessionId,
+              deliverySessionKey: deliveryTarget.sessionKey,
+              deliverySessionId: deliveryTarget.sessionId,
+              deliveryTargetReason: deliveryTarget.reason,
+              skipInitialRequiredNotification: true,
+            },
+          );
+        }
+        const structured = buildStructuredApprovalReply(executed.envelope, params.config.maxWaitMs);
+        if (structured) {
+          return {
+            text: withAutoFillPrefix(structured.text),
+            approval_required: structured.approval_required,
+            approval_request: structured.approval_request,
+            vault_data_found: structured.vault_data_found,
+            vault_data_missing: structured.vault_data_missing,
+          };
+        }
         return {
-          text: withAutoFillPrefix(
-            approvalResponseMessage(executed.envelope, params.config.maxWaitMs),
-          ),
+          text: withAutoFillPrefix(approvalResponseMessage(executed.envelope, params.config.maxWaitMs)),
         };
       }
 

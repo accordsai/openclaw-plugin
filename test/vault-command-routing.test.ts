@@ -208,6 +208,149 @@ describe("createVaultCommandHandler missing-input routing", () => {
     expect(fallbackMock).not.toHaveBeenCalled();
   });
 
+  it("returns structured approval payload and skips auto-wait when context requests skipApprovalAutoWait", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-approval-structured-"));
+    stateDirs.push(stateDir);
+
+    resolveMock.mockResolvedValue({
+      rawEnvelope: {},
+      payload: {
+        status: "RESOLVED_EXECUTABLE",
+        execution: { strategy: "CONNECTOR_EXECUTE_JOB" },
+        inputs: {
+          subject: "Test",
+          text_plain: "Test body",
+        },
+      },
+      telemetry: {
+        usedGuidance: false,
+        guidanceCount: 0,
+        askUserCount: 0,
+        autoRetryCount: 0,
+        autoRetryAttempted: false,
+        factTasksStarted: 0,
+        factTasksCompleted: 0,
+        factTasksFailed: 0,
+        factTasksTimedOut: 0,
+        elapsedMs: 5,
+      },
+    });
+    executeMock.mockResolvedValue({
+      kind: "approval_required",
+      toolName: "vaultclaw_connector_execute_job",
+      envelope: {
+        ok: false,
+        error: {
+          code: "MCP_APPROVAL_REQUIRED",
+          details: {
+            pending_approval: {
+              pending_id: "apj_structured_1",
+              challenge_id: "ach_structured_1",
+              run_id: "run_structured_1",
+              next_action: {
+                tool: "vaultclaw_approval_wait",
+                arguments: {
+                  handle: {
+                    kind: "PLAN_RUN",
+                    run_id: "run_structured_1",
+                    challenge_id: "ach_structured_1",
+                    pending_id: "apj_structured_1",
+                  },
+                },
+              },
+              approval_prompt: {
+                title: "Vault Access Request",
+                body: "Complete booking",
+              },
+              remote_options: [
+                {
+                  value: "approve_once",
+                  label: "Approve once",
+                  decision_mode: "fixed",
+                },
+              ],
+              decision_payloads: {
+                approve_once: {
+                  context: "connector.approval.decision.v1",
+                  payload_hash_sha256: "hash_structured_1",
+                  payload: {
+                    challenge_id: "ach_structured_1",
+                    effect: "ALLOW",
+                  },
+                },
+              },
+              if_approved_data_flow: {
+                secrets: {
+                  endpoint: "yes",
+                  agent: "no",
+                  endpoint_reason: "Endpoint receives payload-secret data if approved.",
+                  agent_reason: "No direct payload-secret reflection path to the approving agent.",
+                },
+                documents: {
+                  endpoint: "no",
+                  agent: "no",
+                  endpoint_reason: "No outbound document attachment in this request.",
+                  agent_reason: "No direct document reflection path to the approving agent.",
+                },
+                auth_credentials: {
+                  endpoint: "no",
+                  agent: "no",
+                  endpoint_reason: "No auth credential claims requested.",
+                  agent_reason: "No auth credential claims requested.",
+                },
+                claim_rows: [],
+              },
+              webauthn_assertion: {
+                key_id: "approver.webauthn.main",
+                challenge_id: "ach_structured_1",
+                challenge_b64u: "Y2hhbGxlbmdl",
+                rp_id: "app.vaultclaw.local",
+                allowed_origins: ["https://app.vaultclaw.local"],
+              },
+              remote_attestation_url: "https://alerts.accords.ai/a/vault_test/apj_structured_1/redeem_code",
+            },
+          },
+        },
+      },
+    } as any);
+    const manager = {
+      onAfterToolCall: vi.fn(),
+    };
+    const handler = createVaultCommandHandler({
+      api: {
+        config: {},
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        runtime: {
+          state: {
+            resolveStateDir: () => stateDir,
+          },
+          system: {
+            runCommandWithTimeout: vi.fn(),
+          },
+        },
+      } as any,
+      manager: manager as any,
+      config: buildConfig("hybrid"),
+      notifier,
+    });
+
+    const result = await handler(
+      buildWebchatContext("send test email", {
+        sessionKey: "agent:main:webchat:direct:tester",
+        skipApprovalAutoWait: true,
+      }),
+    );
+    expect(result.approval_required).toBe(true);
+    expect(result.approval_request?.request_id).toBe("apj_structured_1");
+    expect(result.vault_data_found).toBeUndefined();
+    expect(manager.onAfterToolCall).not.toHaveBeenCalled();
+  });
+
   it("routes approval waits to the main session when /vault runs in local main channel", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "vault-cmd-main-session-"));
     stateDirs.push(stateDir);

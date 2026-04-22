@@ -221,6 +221,38 @@ describe("plugin registration", () => {
     expect(wrappedRewritten?.handled).toBe(true);
     expect(wrappedRewritten?.reply?.text).toContain("Vault command mode:");
 
+    const fromMessages = await beforeAgentReplyHandler(
+      {
+        messages: [
+          { role: "assistant", content: "Hello" },
+          { role: "user", content: "/vault status" },
+        ],
+      },
+      {
+        channelId: "webchat",
+        sessionKey: "agent:main:webchat:direct:tester",
+      },
+    );
+    expect(fromMessages?.handled).toBe(true);
+    expect(fromMessages?.reply?.text).toContain("Vault command mode:");
+
+    const fromBodyMessages = await beforeAgentReplyHandler(
+      {
+        body: {
+          messages: [
+            { role: "assistant", content: "context" },
+            { role: "user", content: "vault status" },
+          ],
+        },
+      },
+      {
+        channelId: "webchat",
+        sessionKey: "agent:main:webchat:direct:tester",
+      },
+    );
+    expect(fromBodyMessages?.handled).toBe(true);
+    expect(fromBodyMessages?.reply?.text).toContain("Vault command mode:");
+
     const passThrough = await beforeAgentReplyHandler(
       {
         cleanedBody: "hello world",

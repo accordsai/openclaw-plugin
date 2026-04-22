@@ -57,6 +57,111 @@ function parseVaultDispatchArgs(event: unknown): string | undefined {
   );
 }
 
+function readTextFromContent(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return readNonEmptyString(value);
+  }
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return readNonEmptyString(entry);
+        }
+        if (!entry || typeof entry !== "object") {
+          return undefined;
+        }
+        const record = entry as Record<string, unknown>;
+        return (
+          readNonEmptyString(record.text) ??
+          readNonEmptyString(record.content) ??
+          readNonEmptyString(record.input_text)
+        );
+      })
+      .filter((entry): entry is string => Boolean(entry));
+    if (parts.length > 0) {
+      return parts.join("\n");
+    }
+  }
+  return undefined;
+}
+
+function readMessageText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    readNonEmptyString(record.cleanedBody) ??
+    readNonEmptyString(record.body) ??
+    readNonEmptyString(record.message) ??
+    readNonEmptyString(record.text) ??
+    readTextFromContent(record.content)
+  );
+}
+
+function readLatestUserMessageText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  let fallback: string | undefined;
+  let latestUser: string | undefined;
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const text = readMessageText(record);
+    if (!text) {
+      continue;
+    }
+    const role = readNonEmptyString(record.role)?.toLowerCase();
+    if (role === "user") {
+      latestUser = text;
+    } else if (!fallback) {
+      fallback = text;
+    }
+  }
+  return latestUser ?? fallback;
+}
+
+function parseVaultBeforeAgentReplyArgs(event: unknown, ctx: unknown): string | undefined {
+  const eventRecord = event as Record<string, unknown> | undefined;
+  const ctxRecord = ctx as Record<string, unknown> | undefined;
+
+  const eventBodyRecord =
+    eventRecord?.body && typeof eventRecord.body === "object" && !Array.isArray(eventRecord.body)
+      ? (eventRecord.body as Record<string, unknown>)
+      : undefined;
+
+  const sources: Array<string | undefined> = [
+    readNonEmptyString(eventRecord?.cleanedBody),
+    readNonEmptyString(eventRecord?.body),
+    readNonEmptyString(eventRecord?.content),
+    readNonEmptyString(eventRecord?.message),
+    readNonEmptyString(eventRecord?.text),
+    readTextFromContent(eventRecord?.content),
+    readLatestUserMessageText(eventRecord?.messages),
+    readLatestUserMessageText(eventBodyRecord?.messages),
+    readNonEmptyString(eventBodyRecord?.message),
+    readMessageText(eventBodyRecord),
+    readNonEmptyString(ctxRecord?.cleanedBody),
+    readNonEmptyString(ctxRecord?.body),
+    readNonEmptyString(ctxRecord?.content),
+    readNonEmptyString(ctxRecord?.message),
+    readNonEmptyString(ctxRecord?.text),
+    readTextFromContent(ctxRecord?.content),
+    readLatestUserMessageText(ctxRecord?.messages),
+  ];
+
+  for (const source of sources) {
+    const parsed = parseVaultArgsFromText(source);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
 function buildCommandContext(params: {
   api: OpenClawPluginApi;
   args: string;
@@ -73,8 +178,9 @@ function buildCommandContext(params: {
   messageThreadId?: string | number;
   threadParentId?: string;
   isAuthorizedSender?: boolean;
+  skipApprovalAutoWait?: boolean;
 }): VaultPluginCommandContext {
-  return {
+  const out: Record<string, unknown> = {
     senderId: params.senderId,
     channel: params.channel,
     channelId: params.channelId as any,
@@ -95,6 +201,38 @@ function buildCommandContext(params: {
     detachConversationBinding: async () => ({ removed: false }),
     getCurrentConversationBinding: async () => null,
   };
+  if (params.skipApprovalAutoWait) {
+    out.skipApprovalAutoWait = true;
+  }
+  return out as VaultPluginCommandContext;
+}
+
+function parseStructuredVaultReply(result: unknown): {
+  approvalRequired?: boolean;
+  approvalRequest?: Record<string, unknown>;
+  vaultDataFound?: string[];
+  vaultDataMissing?: string[];
+} {
+  const row = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const out: {
+    approvalRequired?: boolean;
+    approvalRequest?: Record<string, unknown>;
+    vaultDataFound?: string[];
+    vaultDataMissing?: string[];
+  } = {};
+  if (typeof row.approval_required === "boolean") {
+    out.approvalRequired = row.approval_required;
+  }
+  if (row.approval_request && typeof row.approval_request === "object" && !Array.isArray(row.approval_request)) {
+    out.approvalRequest = row.approval_request as Record<string, unknown>;
+  }
+  if (Array.isArray(row.vault_data_found)) {
+    out.vaultDataFound = row.vault_data_found.filter((item): item is string => typeof item === "string");
+  }
+  if (Array.isArray(row.vault_data_missing)) {
+    out.vaultDataMissing = row.vault_data_missing.filter((item): item is string => typeof item === "string");
+  }
+  return out;
 }
 
 const plugin = {
@@ -236,14 +374,28 @@ const plugin = {
 
       const result = await vaultCommandHandler(commandCtx);
       const text = readNonEmptyString((result as Record<string, unknown> | undefined)?.text);
-      return text ? { handled: true, text } : { handled: true };
+      const structured = parseStructuredVaultReply(result);
+      const reply: Record<string, unknown> = text ? { handled: true, text } : { handled: true };
+      if (typeof structured.approvalRequired === "boolean") {
+        reply.approval_required = structured.approvalRequired;
+      }
+      if (structured.approvalRequest) {
+        reply.approval_request = structured.approvalRequest;
+      }
+      if (structured.vaultDataFound && structured.vaultDataFound.length > 0) {
+        reply.vault_data_found = structured.vaultDataFound;
+      }
+      if (structured.vaultDataMissing && structured.vaultDataMissing.length > 0) {
+        reply.vault_data_missing = structured.vaultDataMissing;
+      }
+      return reply;
     });
 
     // HTTP /v1/chat* ingress (Controlplane path) lands in before_agent_reply with cleanedBody.
     // Keep /vault interception here so command handling remains deterministic even when
     // before_dispatch does not run for this transport path.
     api.on("before_agent_reply", async (event: any, ctx: any) => {
-      const args = parseVaultArgsFromText(readNonEmptyString(event?.cleanedBody));
+      const args = parseVaultBeforeAgentReplyArgs(event, ctx);
       if (args === undefined) {
         return;
       }
@@ -263,14 +415,29 @@ const plugin = {
           ? ctx.gatewayClientScopes.filter((entry: unknown): entry is string => typeof entry === "string")
           : undefined,
         isAuthorizedSender: true,
+        skipApprovalAutoWait: true,
       });
 
       const result = await vaultCommandHandler(commandCtx);
       const text = readNonEmptyString((result as Record<string, unknown> | undefined)?.text);
-      return {
+      const structured = parseStructuredVaultReply(result);
+      const reply: Record<string, unknown> = {
         handled: true,
         reply: text ? { text } : { text: "Vault command processed." },
       };
+      if (typeof structured.approvalRequired === "boolean") {
+        reply.approval_required = structured.approvalRequired;
+      }
+      if (structured.approvalRequest) {
+        reply.approval_request = structured.approvalRequest;
+      }
+      if (structured.vaultDataFound && structured.vaultDataFound.length > 0) {
+        reply.vault_data_found = structured.vaultDataFound;
+      }
+      if (structured.vaultDataMissing && structured.vaultDataMissing.length > 0) {
+        reply.vault_data_missing = structured.vaultDataMissing;
+      }
+      return reply;
     });
 
     api.on("after_tool_call", (event: any, ctx: any) => {

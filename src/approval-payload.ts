@@ -9,7 +9,12 @@ type ParseInvalid = {
   runId?: string;
   jobId?: string;
 };
-type ParseApproval = { type: "approval"; signal: ApprovalSignal };
+type ParseApproval = {
+  type: "approval";
+  signal: ApprovalSignal;
+  approval?: Record<string, unknown>;
+  pendingApproval?: Record<string, unknown>;
+};
 
 export type ApprovalParseResult = ParseNotApproval | ParseInvalid | ParseApproval;
 
@@ -716,17 +721,19 @@ export function parseApprovalRequiredResult(input: unknown): ApprovalParseResult
     job_id: jobId,
   };
 
-  return {
-    type: "approval",
-    signal: buildSignal({
-      tool,
-      handle,
+      return {
+        type: "approval",
+        signal: buildSignal({
+          tool,
+          handle,
       challengeId: handle.challenge_id,
       pendingId: handle.pending_id,
       runId: handle.run_id,
-      jobId: handle.job_id,
-      remoteAttestationURL,
-      remoteAttestationLinkMarkdown,
-    }),
-  };
+          jobId: handle.job_id,
+          remoteAttestationURL,
+          remoteAttestationLinkMarkdown,
+        }),
+        approval,
+        pendingApproval: pendingApproval ?? approval,
+      };
 }
