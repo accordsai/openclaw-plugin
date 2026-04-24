@@ -27,6 +27,20 @@ function asStringArray(value: unknown): string[] {
   return out;
 }
 
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = asString(value).toLowerCase();
+  if (normalized === "true" || normalized === "yes" || normalized === "1") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "no" || normalized === "0") {
+    return false;
+  }
+  return undefined;
+}
+
 function cloneRecord(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!value) {
     return undefined;
@@ -119,6 +133,135 @@ function parseOptions(
     });
   }
   out.sort((left, right) => asString(left.value).localeCompare(asString(right.value)));
+  return out;
+}
+
+function hasKey(record: Record<string, unknown> | undefined, key: string): boolean {
+  if (!record) {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function normalizeMissingInputToken(value: string, fallback: string): string {
+  const source = asString(value) || asString(fallback) || "x";
+  const lower = source.toLowerCase();
+  let out = "";
+  for (const char of lower) {
+    const code = char.charCodeAt(0);
+    const isLower = code >= 97 && code <= 122;
+    const isDigit = code >= 48 && code <= 57;
+    if (isLower || isDigit || char === "." || char === "-" || char === "_") {
+      out += char;
+      continue;
+    }
+    out += "_";
+  }
+  out = out.replace(/^_+|_+$/g, "");
+  return out || "x";
+}
+
+function missingInputIDForDocumentClaim(slot: string, subjectID: string, typeID: string): string {
+  const slotPart = normalizeMissingInputToken(slot, "slot");
+  const subjectPart = normalizeMissingInputToken(subjectID, "self");
+  const typePart = normalizeMissingInputToken(typeID, "document");
+  return `doc__${slotPart}__${subjectPart}__${typePart}`;
+}
+
+function claimHasExplicitMissingEvidence(row: Record<string, unknown>): boolean {
+  const missing = asBoolean(row.missing);
+  if (missing === true) {
+    return true;
+  }
+  const resolved = asBoolean(row.resolved);
+  if (resolved === false) {
+    return true;
+  }
+  const resolveStatus = asString(row.resolve_status).toLowerCase();
+  if (resolveStatus === "missing" || resolveStatus === "unresolved") {
+    return true;
+  }
+  const reasonCode = asString(row.reason_code).toUpperCase();
+  if (
+    reasonCode === "DOCUMENT_NOT_FOUND" ||
+    reasonCode === "DOCUMENT_SLOT_UNRESOLVED" ||
+    reasonCode === "DOCUMENT_ATTACHMENT_UNRESOLVED"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function appendMissingDocumentInput(
+  row: Record<string, unknown>,
+  out: Record<string, unknown>[],
+  seenInputIDs: Set<string>,
+): void {
+  const typeID = asString(row.type_id) || asString(row.declared_type) || asString(row.hint_type);
+  if (!typeID) {
+    return;
+  }
+  const required = asBoolean(row.required);
+  if (required === false) {
+    return;
+  }
+  const slot = asString(row.slot) || "document_attachment";
+  const subjectID = asString(row.subject_id) || "self";
+  const inputID = asString(row.input_id) || missingInputIDForDocumentClaim(slot, subjectID, typeID);
+  if (!inputID || seenInputIDs.has(inputID)) {
+    return;
+  }
+  seenInputIDs.add(inputID);
+
+  const label = asString(row.label) || asString(row.display_name) || typeID;
+  const tags = asStringArray(row.tags);
+  if (tags.length === 0 && slot) {
+    tags.push(`slot:${slot}`);
+  }
+  out.push({
+    input_id: inputID,
+    kind: "document",
+    label,
+    description: asString(row.description) || `Upload ${label} to continue this request.`,
+    required: true,
+    declared_type: asString(row.declared_type) || typeID,
+    hint_type: asString(row.hint_type) || typeID,
+    tags,
+    file_accept: asString(row.file_accept) || "application/pdf,image/*",
+  });
+}
+
+function synthesizeMissingInputsFromExplicitEvidence(
+  pending: Record<string, unknown> | undefined,
+): Record<string, unknown>[] {
+  if (!pending) {
+    return [];
+  }
+  const out: Record<string, unknown>[] = [];
+  const seenInputIDs = new Set<string>();
+
+  const unresolvedClaims = Array.isArray(pending.unresolved_required_document_access)
+    ? pending.unresolved_required_document_access
+    : [];
+  for (const item of unresolvedClaims) {
+    const row = asRecord(item);
+    if (!row) {
+      continue;
+    }
+    appendMissingDocumentInput(row, out, seenInputIDs);
+  }
+
+  const challenge = asRecord(pending.challenge);
+  const requiredDocClaims = Array.isArray(challenge?.required_document_access)
+    ? challenge.required_document_access
+    : [];
+  for (const item of requiredDocClaims) {
+    const row = asRecord(item);
+    if (!row || !claimHasExplicitMissingEvidence(row)) {
+      continue;
+    }
+    appendMissingDocumentInput(row, out, seenInputIDs);
+  }
   return out;
 }
 
@@ -299,6 +442,28 @@ function parseDecisionPayloads(rawPayloads: unknown): Record<string, unknown> | 
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function parseWebAuthnAssertions(rawAssertions: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(rawAssertions)) {
+    return [];
+  }
+  const out: Record<string, unknown>[] = [];
+  for (const item of rawAssertions) {
+    const row = asRecord(item);
+    if (!row) {
+      continue;
+    }
+    const keyID = asString(row.key_id);
+    if (!keyID) {
+      continue;
+    }
+    const next = cloneRecord(row);
+    if (next) {
+      out.push(next);
+    }
+  }
+  return out;
+}
+
 function parseApprovalRequest(parsed: ReturnType<typeof parseApprovalRequiredResult>): Record<string, unknown> | undefined {
   if (parsed.type !== "approval") {
     return undefined;
@@ -308,7 +473,13 @@ function parseApprovalRequest(parsed: ReturnType<typeof parseApprovalRequiredRes
   const prompt = asRecord(pending?.approval_prompt) ?? asRecord(approval?.approval_prompt);
   const decisionPayloads = parseDecisionPayloads(pending?.decision_payloads);
   const options = parseOptions(pending?.remote_options, decisionPayloads);
-  const missingInputs = parseMissingInputs(pending?.missing_inputs);
+  const missingInputsAuthoritative = hasKey(pending, "missing_inputs");
+  const parsedMissingInputs = parseMissingInputs(pending?.missing_inputs);
+  const missingInputs = missingInputsAuthoritative
+    ? parsedMissingInputs
+    : parsedMissingInputs.length > 0
+      ? parsedMissingInputs
+      : synthesizeMissingInputsFromExplicitEvidence(pending);
   const foundFields = parseFoundVaultFields(pending);
   const dataFlowRows = parseDataFlowRows(pending?.if_approved_data_flow);
   const fallbackURL = asString(pending?.remote_attestation_url) || parsed.signal.remoteAttestationURL || "";
@@ -335,12 +506,26 @@ function parseApprovalRequest(parsed: ReturnType<typeof parseApprovalRequiredRes
     data_flow_rows: dataFlowRows,
     remote_attestation_url: fallbackURL,
   };
+  const pendingID = asString(pending?.pending_id) || parsed.signal.pendingId || "";
+  if (pendingID) {
+    out.pending_id = pendingID;
+  }
+  const remoteRequestID = asString(pending?.remote_request_id);
+  if (remoteRequestID) {
+    out.remote_request_id = remoteRequestID;
+  }
   if (decisionPayloads) {
     out.decision_payloads = decisionPayloads;
+  }
+  const webauthnAssertions = parseWebAuthnAssertions(pending?.webauthn_assertions);
+  if (webauthnAssertions.length > 0) {
+    out.webauthn_assertions = webauthnAssertions;
   }
   const webauthnAssertion = asRecord(pending?.webauthn_assertion);
   if (webauthnAssertion) {
     out.webauthn_assertion = cloneRecord(webauthnAssertion);
+  } else if (webauthnAssertions.length > 0) {
+    out.webauthn_assertion = cloneRecord(webauthnAssertions[0]);
   }
   return out;
 }

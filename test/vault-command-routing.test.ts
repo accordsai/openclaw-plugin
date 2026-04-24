@@ -592,15 +592,7 @@ describe("createVaultCommandHandler missing-input routing", () => {
     expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
     expect(resolveMock).toHaveBeenCalledTimes(1);
     expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe("agent:main:webchat:direct:gateway-client");
-    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
-    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
-      sessionKey: "agent:main:webchat:direct:gateway-client",
-      sessionId: "sess-webchat-123",
-      deliverySessionKey: "agent:main:webchat:direct:gateway-client",
-      deliverySessionId: "sess-webchat-123",
-      deliveryTargetReason: "route_session_candidate",
-      skipInitialRequiredNotification: true,
-    });
+    expect(manager.onAfterToolCall).not.toHaveBeenCalled();
   });
 
   it("uses runtime sessionKey when available for webchat command execution and follow-up", async () => {
@@ -673,15 +665,7 @@ describe("createVaultCommandHandler missing-input routing", () => {
     expect(result.text).toBe("Approval required in Vaultclaw UI. Waiting asynchronously for terminal outcome.");
     expect(resolveMock).toHaveBeenCalledTimes(1);
     expect(resolveMock.mock.calls[0]?.[0]?.sessionKey).toBe(runtimeSessionKey);
-    expect(manager.onAfterToolCall).toHaveBeenCalledTimes(1);
-    expect(manager.onAfterToolCall.mock.calls[0]?.[1]).toEqual({
-      sessionKey: runtimeSessionKey,
-      sessionId: "sess-webchat-abc",
-      deliverySessionKey: runtimeSessionKey,
-      deliverySessionId: "sess-webchat-abc",
-      deliveryTargetReason: "runtime_session_key_channel_routable",
-      skipInitialRequiredNotification: true,
-    });
+    expect(manager.onAfterToolCall).not.toHaveBeenCalled();
   });
 
   it("uses main-fresh execution session for webchat local follow-up delivery", async () => {

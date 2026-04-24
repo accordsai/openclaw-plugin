@@ -790,7 +790,10 @@ export function createVaultCommandHandler(params: {
       const autoFillSucceeded = resolved.telemetry.autoRetryAttempted;
       const withAutoFillPrefix = (message: string): string =>
         autoFillSucceeded ? `${autoFillSuccessMessagePrefix()} ${message}` : message;
-      const skipApprovalAutoWait = Boolean((ctx as Record<string, unknown>)?.skipApprovalAutoWait);
+      const skipApprovalAutoWait =
+        Boolean((ctx as Record<string, unknown>)?.skipApprovalAutoWait) ||
+        isWebchatSessionKey(executionSessionKey) ||
+        isWebchatSessionKey(deliveryTarget.sessionKey);
 
       const executed = await executeResolvedVaultRoute({
         config: params.api.config,

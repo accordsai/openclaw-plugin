@@ -71,6 +71,9 @@ const CHANNEL_SESSION_KINDS = new Set([
   "line",
   "msteams",
 ]);
+const SKIP_AUTO_WAIT_DELIVERY_TARGET_KINDS = new Set([
+  "channel:webchat",
+]);
 
 type SessionTarget = {
   sessionId?: string;
@@ -246,6 +249,7 @@ export class ApprovalHandoffManager {
     });
 
     const correlation = this.correlation(signal, executionCorrelationId);
+    const deliveryTargetKind = classifyDeliveryTarget(deliveryTarget);
     const sameTarget =
       executionTarget.sessionKey === deliveryTarget.sessionKey &&
       executionTarget.sessionId === deliveryTarget.sessionId;
@@ -259,7 +263,7 @@ export class ApprovalHandoffManager {
         execution_session_id: executionTarget.sessionId,
         delivery_session_key: deliveryTarget.sessionKey,
         delivery_session_id: deliveryTarget.sessionId,
-        delivery_target_kind: classifyDeliveryTarget(deliveryTarget),
+        delivery_target_kind: deliveryTargetKind,
         selection_reason: ctx.deliveryTargetReason ?? "unspecified",
         same_target: sameTarget,
       },
@@ -274,6 +278,20 @@ export class ApprovalHandoffManager {
         wait_tool: signal.tool,
       },
     });
+
+    if (SKIP_AUTO_WAIT_DELIVERY_TARGET_KINDS.has(deliveryTargetKind)) {
+      logStructured({
+        logger: this.logger,
+        level: "info",
+        event: "wait_skipped_delivery_target",
+        correlation,
+        extra: {
+          delivery_target_kind: deliveryTargetKind,
+          reason: "structured_chat_approval_channel",
+        },
+      });
+      return;
+    }
 
     if (this.workers.has(workerKey)) {
       logStructured({
